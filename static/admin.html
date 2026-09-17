@@ -529,6 +529,22 @@ function meter(label, value, limit, foot, attempt) {
     <div class="cap-note">${foot}</div></div>`;
 }
 
+/* 快路径影子标定。
+   命中率与一致率必须分开看：命中率高而一致率低，说明判据认错了题——切 enforce 会把
+   另一个问题的答案喂给模型。一致率的分母只有"两边都查了库"的那些，模型没查库时
+   无从比对，算进分母等于把"没得比"记成"比对失败"。 */
+function fastpathNote(fp) {
+  if (!fp || !fp.mode || !fp.total) return '';
+  const rate = fp.compared ? (fp.agreed / fp.compared * 100).toFixed(0) : null;
+  const enforcing = fp.mode.indexOf('enforce') >= 0;
+  return `<p class="note"><b>简单问题快路径 · ${esc(fp.mode)}</b>：
+    ${fp.total} 条里认出 <b>${fp.matched}</b> 条${enforcing ? `，实际接管 <b>${fp.applied}</b> 条` : ''}。
+    ${fp.compared
+      ? `与模型自己查的结果比对 ${fp.compared} 条，<b>一致 ${fp.agreed} 条（${rate}%）</b>。`
+      : '本轮没有可比对的样本。'}
+    ${enforcing ? '' : '影子档只比对、不接管，也不计入上下文预算。'}</p>`;
+}
+
 /* 耗时分桶。
    混在一起的 P95 描述的是**题目难度分布**：一步就能答的题与要查六步的题进同一个
    分位数，优化做没做出来会被题目组合的波动盖掉。按工具调用次数分桶才对得起来。
@@ -700,6 +716,7 @@ async function loadEval() {
                  '', delta('cost_per_task'))}
       </div>
       ${latencyBreakdown(m('p95_latency_ms').buckets, m('p95_latency_ms').answer_share_pct)}
+      ${fastpathNote(t.fastpath)}
       </section>
 
     <section class="blk">${hd('上下文红线', '读到了多少语料 · 去重口径 · 峰值')}
@@ -860,6 +877,9 @@ async function loadOnline() {
                  : '¥' + s.avg_cost.toFixed(4), '', `累计 ¥${(s.total_cost || 0).toFixed(4)}`)}
       </div>
       ${latencyBreakdown(s.latency_by_tools, s.answer_share_pct)}
+      ${fastpathNote({mode: s.fastpath_mode, total: s.count, matched: s.fastpath_matched,
+                      applied: s.fastpath_applied, compared: s.fastpath_compared,
+                      agreed: s.fastpath_agreed})}
       </section>
 
     <section class="blk">${hd('上下文红线', '真实提问读到了多少语料 · 峰值')}
@@ -1083,11 +1103,46 @@ function resetList() {
   if (list) list.scrollTop = 0;
 }
 
+/** 把某一条滚进左列表的视野。
+ *
+ *  不用 scrollIntoView：block:'nearest' 只保证"露出来"，从离线评测跳过来的那条
+ *  会贴死在视口最下沿，看着像没滚到。
+ *
+ *  两段滚动缺一不可。列表框自己会滚，但它通常比窗口还高（窗口矮一点时整个列表
+ *  都在折线以下），只滚列表框的话，行在框里居中了、却仍落在页面折线以外——
+ *  跳过来还是找不到人。所以先把面板顶到视口上沿腾出最大可见高度，再在
+ *  「列表框 ∩ 视口」这段里居中。
+ *
+ *  已经看得见就一步都不走：在列表里挨条点着看时，每点一下都重新居中会让整列
+ *  跟着跳，而点的人本来就看着它。
+ */
+function revealInList(el) {
+  const list = $('#tlist');
+  if (!list || !el) return;
+  const seen = () => {
+    const r = el.getBoundingClientRect(), lr = list.getBoundingClientRect();
+    return r.top >= Math.max(lr.top, 0) && r.bottom <= Math.min(lr.bottom, innerHeight);
+  };
+  if (seen()) return;
+
+  // ① 面板顶到视口上沿（留 8px），可见高度最大化
+  const panel = list.closest('.panel') || list;
+  const top = panel.getBoundingClientRect().top;
+  if (top < 0 || top > innerHeight * 0.4) window.scrollBy(0, top - 8);
+
+  // ② 在列表框露出来的那一段里居中
+  const lr = list.getBoundingClientRect();
+  const lo = Math.max(lr.top, 0), hi = Math.min(lr.bottom, innerHeight);
+  const r = el.getBoundingClientRect();
+  const delta = (r.top - lo) - (hi - lo - r.height) / 2;
+  list.scrollTop = Math.max(0, Math.min(list.scrollTop + delta,
+                                        list.scrollHeight - list.clientHeight));
+}
+
 async function selectTrace(id) {
   CURRENT = String(id);
   renderList();
-  // 已经在视野里就不动（block:'nearest'）；跳过来的那条在窗口深处时才滚
-  $(`#tlist .ti[data-id="${id}"]`)?.scrollIntoView({block: 'nearest'});
+  revealInList($(`#tlist .ti[data-id="${id}"]`));
   const box = $('#tdetail');
   box.innerHTML = '<div class="dt"><p style="color:var(--muted);font-size:13px">加载中…</p></div>';
   const d = await api('/api/traces/' + encodeURIComponent(id));
@@ -1269,11 +1324,18 @@ const VIEW = {
 // 左轨点回质量中心时停在上一次看的那一档——切到追踪页再切回来被打回离线档，
 // 等于把人正在看的东西换掉了
 let QTAB = 'eval';
+// 当前视图名，show() 用它判断这次是不是真的换了视图
+let SHOWING = null;
 
 function show(name) {
   if (!VIEW[name]) name = 'eval';
   const v = VIEW[name];
   if (v.tab) QTAB = name;
+  // 换视图就回到页顶。滚动位置是**上一个**视图的：在离线评测滚到底点一行跳过来，
+  // 链路追踪这一页会从半截开始显示，概况和筛选框都在视野外。
+  // 只在真的换了视图时复位——同一档重复点（或跑完用例回到 eval）不该把人弹走。
+  const switched = name !== SHOWING;
+  SHOWING = name;
   document.querySelectorAll('.nav button').forEach(b =>
     b.classList.toggle('on', b.dataset.nav === v.nav));
   Object.keys(VIEW).forEach(k =>
@@ -1287,6 +1349,7 @@ function show(name) {
   ['#runAll', '#runSel'].forEach(sel => $(sel).style.display = name === 'eval' ? '' : 'none');
   $('#runbar')?.classList.toggle('hide', name !== 'eval');
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+  if (switched) window.scrollTo(0, 0);
   v.load();
 }
 document.querySelectorAll('.nav button').forEach(b =>

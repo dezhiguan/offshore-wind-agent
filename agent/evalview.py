@@ -126,6 +126,7 @@ def _trace_record(item: dict[str, Any]) -> dict[str, Any]:
         "served_ms": None,
         "price_basis": {},
         "grounding": {"mode": item.get("grounding")} if item.get("grounding") else {},
+        "fastpath": item.get("fastpath") or {},
         "format_parsed": None,
         "budget": {"db_rows_pct": item.get("db_rows_pct"),
                    "doc_chars_pct": item.get("doc_chars_pct"),
@@ -256,6 +257,7 @@ def load() -> dict[str, Any]:
             "doc_chars_pct": budget.get("doc_chars_pct"),
             # 单文档档是 2026-09-18 才加的：这一天之前落盘的产物里没有这个字段。
             # 缺失就是缺失，None 会让界面整格不出现——补成 0 会被读成"一份都没读到"。
+            "fastpath": meta.get("fastpath") or {},
             "single_doc_pct": budget.get("peak_single_doc_pct"),
             "attempt_single_doc_pct": budget.get("peak_attempt_single_doc_pct"),
             "sources": result.get("sources", []),
@@ -317,6 +319,16 @@ def load() -> dict[str, Any]:
 
     pcts_row = [i["db_rows_pct"] for i in items if i["db_rows_pct"] is not None]
     pcts_doc = [i["doc_chars_pct"] for i in items if i["doc_chars_pct"] is not None]
+    fps = [i.get("fastpath") or {} for i in items]
+    fp_judged = [f for f in fps if f.get("agreed") is not None]
+    fastpath = {
+        "mode": "、".join(sorted({f["mode"] for f in fps if f.get("mode")})) or None,
+        "matched": sum(1 for f in fps if f.get("matched")),
+        "applied": sum(1 for f in fps if f.get("applied")),
+        "compared": len(fp_judged),
+        "agreed": sum(1 for f in fp_judged if f.get("agreed")),
+        "total": len(items),
+    }
     pcts_one = [i["single_doc_pct"] for i in items if i.get("single_doc_pct") is not None]
     att_one = [i["attempt_single_doc_pct"] for i in items
                if i.get("attempt_single_doc_pct") is not None]
@@ -339,6 +351,7 @@ def load() -> dict[str, Any]:
             "limit_single_doc_pct": round(MAX_SINGLE_DOC_RATIO * 100, 1),
             # 这一档之前落盘的产物里没有单文档水位，整格不画比画一个 0% 诚实
             "single_doc_samples": len(pcts_one),
+            "fastpath": fastpath,
         },
     }
 
