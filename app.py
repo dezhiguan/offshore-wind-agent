@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -17,7 +18,7 @@ from pydantic import BaseModel, Field  # noqa: E402
 
 from admin import admin_router  # noqa: E402
 from agent import grounding, replay, tracestore  # noqa: E402
-from agent.composer import compose  # noqa: E402
+from agent.composer import compose, stamp_served  # noqa: E402
 from agent.loop import AgentRunFailed, LlmNotConfigured, run_agent, run_agent_stream  # noqa: E402
 from tools.db import DB_PATH, query_db  # noqa: E402
 from tools.retriever import get_index  # noqa: E402
@@ -56,6 +57,7 @@ def health() -> dict:
 
 @app.post("/ask")
 def ask(req: AskRequest) -> dict:
+    started = time.monotonic()
     if replay.enabled():
         cached = replay.find(req.question)
         if cached:
@@ -74,7 +76,7 @@ def ask(req: AskRequest) -> dict:
         return {"ok": False, "error": "模型调用失败：%s" % exc.cause, "kind": "llm_error"}
     except Exception as exc:
         return {"ok": False, "error": "模型调用失败：%s" % exc, "kind": "llm_error"}
-    result = grounding.apply(compose(req.question, run))
+    result = stamp_served(grounding.apply(compose(req.question, run)), started)
     tracestore.record(req.question, result, source="online")
     return {"ok": True, **result}
 
@@ -85,6 +87,8 @@ def ask_stream(req: AskRequest) -> StreamingResponse:
 
     非流式的 /ask 保留，供回归跑测与离线回放使用。
     """
+    started = time.monotonic()
+
     def events():
         def sse(payload: dict) -> str:
             return "data: %s\n\n" % json.dumps(payload, ensure_ascii=False, default=str)
@@ -105,7 +109,8 @@ def ask_stream(req: AskRequest) -> StreamingResponse:
         try:
             for event in run_agent_stream(req.question):
                 if event["type"] == "done":
-                    result = grounding.apply(compose(req.question, event["result"]))
+                    result = stamp_served(
+                        grounding.apply(compose(req.question, event["result"])), started)
                     tracestore.record(req.question, result, source="online")
                     yield sse({"type": "done", "result": {"ok": True, **result}})
                 else:

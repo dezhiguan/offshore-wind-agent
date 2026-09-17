@@ -140,11 +140,14 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
                 if tc.function and tc.function.arguments:
                     slot["arguments"] += tc.function.arguments
     except Exception as exc:
+        # 失败的调用同样烧了 token：厂商对已产出的部分照常计费。流式在末尾才发
+        # usage，异常打断多半拿不到 —— 那就把"这次的用量没测到"显式记下来，
+        # 而不是记成 0 让 Token / 成本那两格看起来天然不含它。
         span.close(input_summary="上下文 %d 条消息" % len(messages),
                    output_summary="%s：%s" % (type(exc).__name__, exc),
                    input_detail=_request_detail(model, messages),
                    output_detail=_detail({"error": "%s：%s" % (type(exc).__name__, exc)}),
-                   status=ERROR)
+                   status=ERROR, **_usage_of(model, usage))
         raise
 
     calls = [_Call(v["id"], v["name"], v["arguments"]) for _, v in sorted(partial.items())]
@@ -175,6 +178,22 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
         # 模型没按三段格式输出时的兜底：一次性给出，不让界面空着
         yield {"type": "token", "text": content}
     yield {"type": "_message", "message": _Msg(content, calls)}
+
+
+def _usage_of(model: str, usage: Any) -> dict[str, Any]:
+    """把一次调用的用量折成 span 上的计量字段。
+
+    ``usage`` 为空表示这次没测到（流式被异常打断，usage 在末尾那一帧还没到）。
+    此时打 ``usage_missing`` 标记：后台据此在 Token 那格标注"另有 N 次调用未计量"，
+    而不是把缺失当成零。
+    """
+    if usage is None:
+        return {"usage_missing": True}
+    pt = getattr(usage, "prompt_tokens", 0) or 0
+    ct = getattr(usage, "completion_tokens", 0) or 0
+    cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
+    return {"prompt_tokens": pt, "completion_tokens": ct, "cached_tokens": cached,
+            "cost_cny": round(price_of(model, pt, ct, cached), 6)}
 
 
 def _detail(obj: Any) -> str:
@@ -225,6 +244,9 @@ def _plain(msg) -> dict[str, Any]:
 def _summarize(name: str, result: dict[str, Any]) -> str:
     """给 UI 时间线用的一行摘要。不放全量结果，避免界面被刷屏。"""
     if not result.get("ok", True):
+        # 护栏拦下的那一次，结果里带着预算报表 —— 它不是"失败"，是按红线不放行
+        if result.get("budget"):
+            return "护栏拦截：%s" % result.get("error", "")[:80]
         return "失败：%s" % result.get("error", "")[:80]
     if name == "query_db":
         n = result.get("row_count", 0)
@@ -314,6 +336,7 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
             messages.append(_plain(msg))
             for call in msg.tool_calls:
                 name = call.function.name
+                guard: str | None = None      # 非空表示这次调用被护栏按红线拦下
                 tool_span = tr.start(TOOL_KIND.get(name, "TOOL"), name)
                 try:
                     args = json.loads(call.function.arguments or "{}")
@@ -332,32 +355,38 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
                         else:
                             # 题面红线：不得把整个数据库或文档放入上下文。
                             # 这里做运行时拦截，而不是事后统计。
-                            rows, chars = measure(name, result)
-                            refusal = budget.would_exceed(rows=rows, chars=chars)
+                            draw = measure(name, result)
+                            refusal = budget.would_exceed(draw)
                             if refusal:
-                                tr.record("GUARD", "上下文预算", status=DEGRADED,
-                                          input_summary="本次拟引入 %d 行 / %d 字符" % (rows, chars),
-                                          output_summary=refusal,
-                                          budget=budget.report())
+                                # 拦截**只记在这一次工具调用上**，不另开一条 GUARD span：
+                                # 同一件事记两条，后台会把它读成"一次工具失败 + 一次护栏降级"，
+                                # 异常清单里也会出现两行同样的文字。
+                                guard = "上下文预算"
                                 result = {"ok": False, "error": refusal,
                                           "budget": budget.report()}
                             else:
-                                budget.charge(rows=rows, chars=chars)
+                                budget.charge(draw)
 
                 entry = {
                     "step": len(trace) + 1,
                     "tool": name,
                     "input": args,
                     "ok": result.get("ok", True),
+                    "refused": bool(guard),
                     "summary": _summarize(name, result),
                 }
                 trace.append(entry)
+                # 被护栏拒绝不是"工具失败"：工具本身跑通了，是系统按红线不让结果进上下文。
+                # 记成 ERROR 会让后台的「工具调用成功率」被自家护栏拉低 —— 而同一个后台
+                # 在「未取证拒答率」旁边写着"护栏生效，不是故障"。两处口径必须一致。
                 tool_span.close(
                     input_summary=json.dumps(args, ensure_ascii=False)[:160],
                     output_summary=entry["summary"],
                     input_detail=_detail(args),
                     output_detail=_detail(result),
-                    status=OK if entry["ok"] else ERROR,
+                    status=DEGRADED if guard else (OK if entry["ok"] else ERROR),
+                    guard=guard,
+                    budget=budget.report() if guard else None,
                 )
                 _collect_evidence(evidence, name, args, result)
                 yield {"type": "step", "step": entry}
@@ -425,11 +454,12 @@ def _force_answer(client: OpenAI, model: str, messages: list[dict[str, Any]], tr
             model=model, messages=messages, extra_body={"enable_thinking": ENABLE_THINKING},
         )
     except Exception as exc:
+        # 非流式调用异常时连 usage 对象都没有，同样标成"未计量"
         span.close(input_summary="上下文 %d 条消息" % len(messages),
                    output_summary="%s：%s" % (type(exc).__name__, exc),
                    input_detail=_request_detail(model, messages),
                    output_detail=_detail({"error": "%s：%s" % (type(exc).__name__, exc)}),
-                   status=ERROR)
+                   status=ERROR, usage_missing=True)
         raise
     content = resp.choices[0].message.content or ""
     usage = getattr(resp, "usage", None)

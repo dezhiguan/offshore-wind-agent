@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Response
@@ -23,7 +24,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent import evalview, grounding, tracestore
-from agent.composer import compose
+from agent.composer import compose, stamp_served
 from agent.loop import AgentRunFailed, run_agent
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -85,7 +86,9 @@ def eval_run(req: RunRequest) -> StreamingResponse:
             yield sse({"type": "running", "id": case["id"], "index": i,
                        "question": case["question"]})
             try:
-                result = grounding.apply(compose(case["question"], run_agent(case["question"])))
+                t0 = time.monotonic()
+                result = stamp_served(
+                    grounding.apply(compose(case["question"], run_agent(case["question"]))), t0)
                 # 标成 eval：链路追踪页照样看得到，但线上质量的分母里不能有它
                 tracestore.record(case["question"], result, source="eval")
                 ok, problems = evalview.judge(case, result)

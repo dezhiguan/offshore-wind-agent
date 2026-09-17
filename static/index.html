@@ -101,6 +101,8 @@ ol.steps li::before{content:counter(s);font-family:var(--mono);font-size:11px;
   border-radius:4px;display:flex;align-items:center;justify-content:center;margin-top:2px}
 .tool{font-family:var(--mono);font-size:12px;color:var(--accent);flex:0 0 132px}
 .sum{color:var(--ink-2);min-width:0;word-break:break-word}
+/* 工具真失败标红；被护栏按上下文红线拦下标黄 —— 后者是系统按规矩办事，不是出错 */
+.sum.bad{color:var(--crit)} .sum.warn{color:var(--warn)}
 .bad{color:var(--crit)}
 
 details{border:1px solid var(--line);border-radius:6px;margin-bottom:8px;background:var(--surface)}
@@ -285,8 +287,8 @@ function render(d) {
   if (parts.length) P.push(`<div class="card"><h3>原始依据</h3>${parts.join('')}</div>`);
 
   if (d.trace?.length) P.push(`<div class="card"><h3>查询过程</h3><ol class="steps">${
-    d.trace.map(t => `<li><span class="tool">${esc(t.tool)}</span><span class="sum${t.ok ? '' : ' bad'}">${esc(t.summary)}</span></li>`).join('')}</ol>
-    <p class="meta">共 ${d.meta?.steps ?? 0} 次工具调用 · 耗时 ${((d.meta?.elapsed_ms ?? 0) / 1000).toFixed(1)} 秒${
+    d.trace.map(t => `<li><span class="tool">${esc(t.tool)}</span><span class="sum${t.ok ? '' : t.refused ? ' warn' : ' bad'}">${esc(t.summary)}</span></li>`).join('')}</ol>
+    <p class="meta">共 ${d.meta?.steps ?? 0} 次工具调用 · 耗时 ${(((d.meta?.served_ms ?? d.meta?.elapsed_ms) ?? 0) / 1000).toFixed(1)} 秒${
       d.meta?.stop_reason === 'max_steps' ? ' · 已达步数上限，回答基于已取得的证据' : ''}${
       d.meta?.format_parsed === false ? ' · 模型未按格式输出，已降级显示原文' : ''}
 </p></div>`);
@@ -299,7 +301,7 @@ function render(d) {
 function liveView(steps, note, draft) {
   const trace = `<div class="live"><h3>查询过程</h3>
     <ol class="steps">${steps.map(t =>
-      `<li><span class="tool">${esc(t.tool)}</span><span class="sum${t.ok ? '' : ' bad'}">${esc(t.summary)}</span></li>`).join('')}
+      `<li><span class="tool">${esc(t.tool)}</span><span class="sum${t.ok ? '' : t.refused ? ' warn' : ' bad'}">${esc(t.summary)}</span></li>`).join('')}
       ${draft ? '' : `<li class="pending"><span class="tool"><span class="spin"></span></span><span class="sum">${esc(note)}</span></li>`}
     </ol><div class="tick" id="tick"></div></div>`;
   // 答案边写边显示：首字时间从「等到最后」变成约两秒

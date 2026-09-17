@@ -32,10 +32,11 @@ def _diagnose(spans: list[dict[str, Any]], meta: dict[str, Any]) -> tuple[str, l
     """
     notes: list[dict[str, str]] = []
     for s in spans:
-        if s.get("status") == "ERROR":
-            notes.append({"kind": s.get("name", ""), "text": s.get("output", "")})
-        elif s.get("status") == "DEGRADED":
-            notes.append({"kind": s.get("name", ""), "text": s.get("output", "")})
+        if s.get("status") in ("ERROR", "DEGRADED"):
+            # 被护栏拦下的那次调用，异常清单里要报"上下文预算"而不是工具名——
+            # 报工具名会把"红线生效"读成"query_db 出错了"。
+            notes.append({"kind": s.get("guard") or s.get("name", ""),
+                          "text": s.get("output", "")})
     stop = meta.get("stop_reason")
     if stop == "max_steps":
         notes.append({"kind": "步数上限", "text": "已达工具调用步数上限，回答基于当时已取得的证据"})
@@ -89,6 +90,9 @@ def record(question: str, result: dict[str, Any], *, source: str = "online",
             "elapsed_ms": meta.get("elapsed_ms"),
             "stop_reason": meta.get("stop_reason"),
             "steps": meta.get("steps"),
+            # elapsed_ms 只量到链路收口；served_ms 含解析、核实清单与接地校验
+            "served_ms": meta.get("served_ms"),
+            "price_basis": meta.get("price_basis") or {},
             "budget": meta.get("budget") or {},
             "sources": result.get("sources") or [],
             "answer": result.get("answer") or "",
@@ -131,12 +135,17 @@ def stats(source: str | None = None) -> dict[str, Any]:
     items = _pick(source)
     if not items:
         return {"count": 0}
-    lat = [t["elapsed_ms"] for t in items if t.get("elapsed_ms")]
+    # 「端到端耗时」就按端到端取：served_ms 含收口后处理，老记录没有它才退回 elapsed_ms
+    lat = [t.get("served_ms") or t["elapsed_ms"] for t in items if t.get("elapsed_ms")]
     toks = [(t["summary"].get("prompt_tokens", 0) or 0) + (t["summary"].get("completion_tokens", 0) or 0)
             for t in items]
     costs = [t["summary"].get("cost_cny", 0) or 0 for t in items]
     tool_calls = sum(t["summary"].get("tool_calls", 0) or 0 for t in items)
     tool_fail = sum(t["summary"].get("tool_failures", 0) or 0 for t in items)
+    # 护栏按红线拒绝的调用：工具跑通了，结果没被放进上下文。既不算成功也不算失败，
+    # 从成功率的分母里剔除 —— 否则红线越管用，"工具调用成功率"越难看。
+    tool_refused = sum(t["summary"].get("tool_refused", 0) or 0 for t in items)
+    tool_judged = tool_calls - tool_refused
     model_calls = sum(t["summary"].get("model_calls", 0) or 0 for t in items)
     model_fail = sum(t["summary"].get("model_failures", 0) or 0 for t in items)
     degraded = sum(t["summary"].get("degraded", 0) or 0 for t in items)
@@ -158,6 +167,10 @@ def stats(source: str | None = None) -> dict[str, Any]:
     doc_pcts = [t.get("budget", {}).get("doc_chars_pct") for t in items]
     db_pcts = [v for v in db_pcts if v is not None]
     doc_pcts = [v for v in doc_pcts if v is not None]
+    # 工具返回真正注入上下文的字符数（含重复与 JSON 结构），与覆盖率不是一回事
+    ctx_chars = [t.get("budget", {}).get("context_chars") for t in items]
+    ctx_chars = [v for v in ctx_chars if v is not None]
+    unmetered = sum(t["summary"].get("usage_missing_calls", 0) or 0 for t in items)
     return {
         "count": len(items),
         "capacity": MAX_TRACES,
@@ -175,6 +188,8 @@ def stats(source: str | None = None) -> dict[str, Any]:
         "flagged_rate": round(flagged / len(items) * 100, 1),
         "peak_db_rows_pct": max(db_pcts) if db_pcts else None,
         "peak_doc_chars_pct": max(doc_pcts) if doc_pcts else None,
+        "peak_context_chars": max(ctx_chars) if ctx_chars else None,
+        "usage_missing_calls": unmetered,
         "p95_ms": _p95(lat),
         "p50_ms": int(statistics.median(lat)) if lat else None,
         "avg_tokens": round(statistics.mean(toks)) if toks else None,
@@ -187,7 +202,9 @@ def stats(source: str | None = None) -> dict[str, Any]:
         "failed_traces": sum(1 for t in items if t.get("status") == "FAILED"),
         "tool_calls": tool_calls,
         "tool_failures": tool_fail,
-        "tool_success_rate": round((tool_calls - tool_fail) / tool_calls * 100, 1) if tool_calls else None,
+        "tool_refused": tool_refused,
+        "tool_success_rate": round((tool_judged - tool_fail) / tool_judged * 100, 1)
+                             if tool_judged else None,
         "chain_completion_rate": round(normal / len(items) * 100, 1),
         "degraded": degraded,
         "degraded_traces": degraded_traces,
