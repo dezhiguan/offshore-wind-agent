@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
+from agent import evalview  # noqa: E402
 from agent.composer import compose  # noqa: E402
 from agent.loop import run_agent  # noqa: E402
 from eval.verdict import check  # noqa: E402
@@ -64,6 +65,10 @@ def main(argv: list[str]) -> int:
             result.get("meta", {}).get("steps", 0), "; ".join(problems)))
 
     print("\n%d/%d 通过" % (passed, len(cases)))
+    # 与后台「运行全部」共用同一个快照函数：两处各记一份必然对不上，
+    # 而「较上次」比的就是这条流水账
+    snap = evalview.snapshot(ran=len(cases))
+    print("已记录指标快照 %s（本轮跑 %d 条 / 共 %d 条）" % (snap["at"], len(cases), snap["total"]))
     return 0 if passed == len(cases) else 1
 
 

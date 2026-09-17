@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import statistics
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,10 @@ from eval.verdict import SUITES, check  # noqa: E402
 
 OUT_DIR = ROOT / "eval" / "out"
 EVAL_DIR = ROOT / "eval"
+
+# 指标快照的流水账。**扩展名必须不是 .json**：load() 用 glob("*.json") 扫产物，
+# 叫 _history.json 会被当成一条用例产物解析。
+HISTORY = OUT_DIR / "_history.jsonl"
 
 
 def _suite_of(case_id: str, stored: str | None) -> str:
@@ -69,6 +74,62 @@ def persist(case: dict[str, Any], result: dict[str, Any]) -> None:
                "suite": case.get("_suite"), "result": result}
     (OUT_DIR / ("%s.json" % case["id"])).write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def snapshot(ran: int | None = None) -> dict[str, Any]:
+    """把这一轮跑完之后的指标记一条快照。
+
+    「较上次」要有个上次。指标是从 eval/out 的产物现算的，而产物只留最新一份——
+    不落快照的话，上一轮的数字在这一轮覆盖产物时就跟着消失了，趋势无从谈起。
+
+    append-only 的一行一条：这是流水账不是状态。改写历史比丢失历史更糟——
+    指标回退时，最该看的恰恰是"从哪一轮开始退的"。
+
+    ran 记这一轮实际跑了几条。页面要用它说清楚："上次"是只跑了 1 条之后的状态，
+    还是整套跑完之后的状态；两者的可比性不一样。
+    """
+    data = load()
+    record = {
+        "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "ran": ran,
+        "total": data["totals"]["total"],
+        "passed": data["totals"]["passed"],
+        "metrics": {k: v.get("value") for k, v in data["metrics"].items()},
+    }
+    HISTORY.parent.mkdir(parents=True, exist_ok=True)
+    with HISTORY.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
+def history(limit: int = 30) -> list[dict[str, Any]]:
+    """读快照流水账。坏行跳过而不是抛异常——一行手工编辑坏了，
+    不该让整个评测页打不开。"""
+    if not HISTORY.exists():
+        return []
+    records = []
+    for line in HISTORY.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return records[-limit:]
+
+
+def trend() -> dict[str, Any]:
+    """本轮与上一轮的对照基准。
+
+    流水账的最后一条就是当前这一轮（跑完即落），所以"上次"是倒数第二条。
+    只有一条时没有可比对象——如实说"首轮"，不要拿空值算出一堆 0% 的涨跌。
+    """
+    records = history()
+    if len(records) < 2:
+        return {"baseline": None, "current": records[-1] if records else None,
+                "reason": "首轮评测，尚无上一轮可比" if records else "尚未记录过指标快照"}
+    return {"baseline": records[-2], "current": records[-1], "reason": None}
 
 
 def load() -> dict[str, Any]:
@@ -142,6 +203,7 @@ def load() -> dict[str, Any]:
         "items": items,
         "summary": summary,
         "metrics": metrics(items),
+        "trend": trend(),
         "totals": {
             "total": len(items),
             "passed": sum(1 for i in items if i["ok"]),

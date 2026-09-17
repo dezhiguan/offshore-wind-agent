@@ -116,7 +116,9 @@ def eval_run(req: RunRequest) -> StreamingResponse:
                        "steps": result.get("meta", {}).get("steps"),
                        "tokens": (ts.get("prompt_tokens", 0) or 0) + (ts.get("completion_tokens", 0) or 0),
                        "cost_cny": ts.get("cost_cny")})
-        yield sse({"type": "done"})
+        # 跑完记一条指标快照：页面上的「较上次」靠它，与命令行 eval/run.py 走同一个函数
+        snap = evalview.snapshot(ran=len(cases))
+        yield sse({"type": "done", "at": snap["at"]})
 
     return StreamingResponse(events(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

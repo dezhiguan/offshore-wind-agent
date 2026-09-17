@@ -234,6 +234,38 @@ td.id{font-family:var(--mono);font-weight:600;color:var(--muted)}
   border-radius:3px;background:var(--surface-2);color:var(--muted);flex:0 0 auto;white-space:nowrap}
 .src.eval{background:var(--accent-soft);color:var(--accent)}
 .tlist .none{padding:26px;text-align:center;color:var(--muted);font-size:12.5px}
+/* 涨跌标：跟在指标数字后面。颜色按**好坏**给，不按方向给——
+   耗时涨了是坏事，准确率涨了是好事，统一用绿色表示"上升"会把人带沟里。 */
+.dl{font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:.02em;
+  padding:2px 6px;border-radius:4px;margin-left:8px;white-space:nowrap;vertical-align:.32em}
+.dl.good{background:var(--ok-soft);color:var(--ok)}
+.dl.bad{background:var(--crit-soft);color:var(--crit)}
+.dl.flat{background:var(--surface-2);color:var(--muted)}
+.gate .big .dl{font-size:12px;vertical-align:.8em;margin-left:12px}
+
+/* 链路追踪顶部的导航条。这一页是**诊断**不是度量：它该回答「这批留存里有什么、
+   该点开哪条」，而不是再出一套聚合指标——同名指标在两个页面上因样本不同给出不同
+   数值（这里是最近 50 条混着线上与回归，那里是固定用例集），看的人只会以为系统
+   自相矛盾。聚合口径统一归 Agent 质量中心。 */
+.tnav{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--surface);
+  border:1px solid var(--line);border-radius:var(--r);padding:12px 16px}
+.tnav .seg{font-size:12px;color:var(--muted);display:flex;align-items:baseline;gap:5px}
+.tnav .seg b{font-family:var(--mono);font-size:1.02rem;color:var(--ink);font-variant-numeric:tabular-nums}
+.tnav .seg .u{font-family:var(--mono);font-size:11px}
+.tnav .bar{width:1px;height:18px;background:var(--line)}
+.tnav .grow{flex:1}
+.tnav .at{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.fchip{font:inherit;font-size:12px;cursor:pointer;display:inline-flex;align-items:baseline;gap:6px;
+  padding:5px 11px;border-radius:20px;background:var(--surface-2);color:var(--ink-2);
+  border:1px solid var(--line);transition:background .12s,border-color .12s}
+.fchip b{font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums}
+.fchip:hover:not(:disabled){border-color:var(--line-2)}
+.fchip:disabled{opacity:.45;cursor:default}
+.fchip.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
+.fchip.warn.on{background:var(--warn-soft);border-color:var(--warn);color:var(--warn)}
+.fchip.crit.on{background:var(--crit-soft);border-color:var(--crit);color:var(--crit)}
+.fchip.clear{background:transparent;border-style:dashed;color:var(--muted)}
+
 .pager{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11.5px;color:var(--muted)}
 .pager .cnt{font-family:var(--mono);letter-spacing:.03em}
 .pager .grow{flex:1}
@@ -402,14 +434,46 @@ const api = p => fetch(p + (p.includes('?') ? '&' : '?') + '_=' + Date.now(),
                        {cache: 'no-store'}).then(r => r.json());
 const grade = (v, g, w) => v == null ? '' : (v >= g ? ' good' : v >= w ? ' warn' : ' bad');
 
+/* 与上一轮评测的涨跌。
+   单位是刻意分开的：**比率类用百分点（pp），量纲类用相对百分比（%）**。
+   准确率从 96 到 99 写成「+3%」会被读成相对变化（实际是 3 个百分点），
+   而耗时从 20s 到 22s 写成「+2」毫无意义——两类指标本就不该共用一个单位。 */
+const TREND = {
+  result_accuracy:  {unit: 'pp', good: 'up'},
+  task_completion:  {unit: 'pp', good: 'up'},
+  tool_success:     {unit: 'pp', good: 'up'},
+  chain_completion: {unit: 'pp', good: 'up'},
+  p95_latency_ms:   {unit: '%',  good: 'down'},
+  avg_tokens:       {unit: '%',  good: 'down'},
+  cost_per_task:    {unit: '%',  good: 'down'},
+};
+let BASELINE = null, METRICS = {};   // 上一轮快照的 metrics（没有就是首轮）与本轮指标
+
+function delta(key) {
+  const cfg = TREND[key];
+  if (!cfg || !BASELINE) return '';
+  const was = BASELINE[key], now = (METRICS[key] || {}).value;
+  if (was == null || now == null) return '';
+  const diff = cfg.unit === 'pp' ? now - was : (was ? (now - was) / was * 100 : null);
+  if (diff == null) return '';
+  // 小于这个幅度当持平：把 0.01pp 的抖动画成红色箭头，等于每轮都在报警
+  const eps = cfg.unit === 'pp' ? 0.05 : 0.5;
+  if (Math.abs(diff) < eps) return '<span class="dl flat">持平</span>';
+  const up = diff > 0;
+  const good = (up ? 'up' : 'down') === cfg.good;
+  return `<span class="dl ${good ? 'good' : 'bad'}">${up ? '▲' : '▼'} ${
+    Math.abs(diff).toFixed(1)}${cfg.unit}</span>`;
+}
+
 const hd = (n, d) => `<div class="hd"><span class="n">${n}</span>${
   d ? `<span class="d">${esc(d)}</span>` : ''}<span class="line"></span></div>`;
 
-function metric(label, badge, val, unit, sub, cls) {
+function metric(label, badge, val, unit, sub, cls, trend) {
   return `<div class="m${cls || ''}">
     <div class="lb">${label}${badge ? `<em>${badge}</em>` : ''}</div>
     <div class="v">${val === null || val === undefined
-      ? '<span class="dash">—</span>' : esc(val) + (unit ? `<small>${unit}</small>` : '')}</div>
+      ? '<span class="dash">—</span>' : esc(val) + (unit ? `<small>${unit}</small>` : '')}${
+      trend || ''}</div>
     <div class="s">${esc(sub || '')}</div></div>`;
 }
 
@@ -518,12 +582,27 @@ async function loadEval() {
   }
   const M = d.metrics || {}, m = k => M[k] || {}, t = d.totals;
   const allPass = t.passed === t.total;
+  // 趋势：与上一轮快照比。delta() 读这两个全局量
+  METRICS = M;
+  const tr = d.trend || {};
+  BASELINE = tr.baseline ? tr.baseline.metrics : null;
+  // 用例集变过就不能直接比：11 条时的准确率和 26 条时的不是一回事
+  const sameSet = !BASELINE || tr.baseline.total === t.total;
+  if (!sameSet) BASELINE = null;
+  const trendNote = BASELINE
+    ? `涨跌为与上一轮评测（<b>${esc(tr.baseline.at)}</b>${
+        tr.baseline.ran ? ` · 那轮跑了 ${tr.baseline.ran} 条` : ''}）相比：
+       比率类用<b>百分点 pp</b>，耗时 / Token / 成本用<b>相对百分比</b>。`
+    : tr.baseline && !sameSet
+      ? `上一轮评测共 <b>${tr.baseline.total}</b> 条用例、本轮 <b>${t.total}</b> 条，用例集有变动，不做涨跌对比。`
+      : esc(tr.reason || '尚无可比的上一轮') + '。跑完一轮会记一条指标快照，下一轮起显示涨跌。';
 
   box.innerHTML = `
     <section class="blk">${hd('质量门禁', '断言全部命中才算通过 · 离线口径')}
       <div class="gate">
         <div>
-          <div class="big${allPass ? '' : ' bad'}">${m('result_accuracy').value ?? '—'}<small>%</small></div>
+          <div class="big${allPass ? '' : ' bad'}">${m('result_accuracy').value ?? '—'}<small>%</small>${
+            delta('result_accuracy')}</div>
           <div class="cap">结果准确率 · <b>${t.passed} / ${t.total}</b> 条通过</div>
         </div>
         <div>
@@ -532,25 +611,32 @@ async function loadEval() {
           <div class="suites">${d.summary.map(s =>
             `<span><b>${s.passed}/${s.total}</b>${esc(s.label)}</span>`).join('')}</div>
         </div>
-      </div></section>
+      </div>
+      <p class="note">${trendNote}</p></section>
 
     <section class="blk">${hd('执行健康', '过程是否按预期收口')}
       <div class="grid">
         ${metric('任务完成率', 'NON-EMPTY', m('task_completion').value, '%',
-                 m('task_completion').note, grade(m('task_completion').value, 95, 80))}
+                 m('task_completion').note, grade(m('task_completion').value, 95, 80),
+                 delta('task_completion'))}
         ${metric('工具调用成功率', 'BY CALL', m('tool_success').value, '%',
-                 m('tool_success').note, grade(m('tool_success').value, 95, 85))}
+                 m('tool_success').note, grade(m('tool_success').value, 95, 85),
+                 delta('tool_success'))}
         ${metric('链路完成率', 'NO CUTOFF', m('chain_completion').value, '%',
-                 m('chain_completion').note, grade(m('chain_completion').value, 95, 85))}
+                 m('chain_completion').note, grade(m('chain_completion').value, 95, 85),
+                 delta('chain_completion'))}
       </div></section>
 
     <section class="blk">${hd('代价', '延迟与成本')}
       <div class="grid">
         ${metric('P95 端到端耗时', 'LATENCY', m('p95_latency_ms').value == null ? null
-                 : (m('p95_latency_ms').value / 1000).toFixed(1), 's', m('p95_latency_ms').note)}
-        ${metric('平均 Token 消耗', 'PER TASK', m('avg_tokens').value, '', m('avg_tokens').note)}
+                 : (m('p95_latency_ms').value / 1000).toFixed(1), 's', m('p95_latency_ms').note,
+                 '', delta('p95_latency_ms'))}
+        ${metric('平均 Token 消耗', 'PER TASK', m('avg_tokens').value, '', m('avg_tokens').note,
+                 '', delta('avg_tokens'))}
         ${metric('单任务成本', 'CNY', m('cost_per_task').value == null ? null
-                 : '¥' + m('cost_per_task').value.toFixed(4), '', m('cost_per_task').note)}
+                 : '¥' + m('cost_per_task').value.toFixed(4), '', m('cost_per_task').note,
+                 '', delta('cost_per_task'))}
       </div></section>
 
     <section class="blk">${hd('上下文红线', '进入模型上下文的语料占比 · 峰值')}
@@ -762,7 +848,7 @@ async function openTrace(id, cell) {
   }
   cell.parentElement.classList.add('open');
 }
-let TRACES = [], CURRENT = null;
+let TRACES = [], CURRENT = null, TRACE_CAP = 50;
 // 从「线上质量」的最近问答表点过来时要定位的那一条；用完即清
 let FOCUS = null;
 
@@ -790,6 +876,39 @@ function traceRow(t) {
     </span></div>`;
 }
 
+/** 顶部导航条。计数取**全部留存**（不跟着筛选走）——它回答的是"这批里有多少"，
+ *  筛选状态用高亮表示。点一下按筛选，再点一下取消。 */
+function renderTraceNav(capacity) {
+  const box = $('#tnav');
+  if (!box) return;
+  const n = f => TRACES.filter(f).length;
+  const org = $('#torg')?.value || '', st = $('#tst')?.value || '';
+  const chip = (label, count, kind, val, cur, cls) =>
+    `<button class="fchip ${cls || ''}${cur === val ? ' on' : ''}" data-k="${kind}" data-v="${val}"
+      ${count ? '' : 'disabled'}>${label}<b>${count}</b></button>`;
+
+  box.innerHTML = `<div class="tnav">
+    <span class="seg"><span>留存</span><b>${TRACES.length}</b><span class="u">/ ${capacity}</span></span>
+    <span class="bar"></span>
+    ${chip('线上', n(t => (t.source || 'online') === 'online'), 'org', 'online', org)}
+    ${chip('回归', n(t => t.source === 'eval'), 'org', 'eval', org)}
+    <span class="bar"></span>
+    ${chip('降级', n(t => t.status === 'DEGRADED'), 'st', 'DEGRADED', st, 'warn')}
+    ${chip('失败', n(t => t.status === 'FAILED'), 'st', 'FAILED', st, 'crit')}
+    ${org || st ? '<button class="fchip clear" data-k="clear" data-v="">清除筛选</button>' : ''}
+    <span class="grow"></span>
+    <span class="at">最近一条 ${esc(TRACES[0]?.at || '—')}</span>
+  </div>`;
+
+  box.querySelectorAll('.fchip').forEach(b => b.onclick = () => {
+    const sel = {org: '#torg', st: '#tst'}[b.dataset.k];
+    if (b.dataset.k === 'clear') { $('#torg').value = ''; $('#tst').value = ''; }
+    // 再点一次同一个 = 取消，不用去下拉框里找"全部"
+    else $(sel).value = $(sel).value === b.dataset.v ? '' : b.dataset.v;
+    resetList();
+  });
+}
+
 function renderList() {
   const kw = ($('#tq')?.value || '').trim().toLowerCase();
   const st = $('#tst')?.value || '';
@@ -813,12 +932,15 @@ function renderList() {
     : '<div class="none">没有匹配的执行记录</div>';
   $('#tlist').querySelectorAll('.ti').forEach(el =>
     el.onclick = () => selectTrace(Number(el.dataset.id)));
+  // 下拉框也能改筛选，导航条的高亮得跟着走
+  renderTraceNav(TRACE_CAP);
 }
 
 /** 改筛选条件即回到第一页。不复位的话，筛完只剩 3 条时窗口还停在 30，
  *  下次清空筛选又会一口气铺出 30 条——分页等于没做。 */
 function resetList() {
   SHOWN = PAGE;
+  renderTraceNav(TRACE_CAP);
   renderList();
   const list = $('#tlist');
   if (list) list.scrollTop = 0;
@@ -894,24 +1016,10 @@ async function loadTraces() {
   const srcs = [...new Set(d.items.flatMap(t => (t.sources || [])
     .map(x => x.replace(/（.*?）/, ''))))];
 
+  TRACE_CAP = s.capacity || 50;
   box.innerHTML = `
-    <section class="blk">${hd('链路健康', `进程内留存 ${s.count} / ${s.capacity} 条 · 线上与回归合计 · 重启即清空`)}
-      <div class="grid">
-        ${metric('P95 总耗时', 'LATENCY', s.p95_ms == null ? null : (s.p95_ms / 1000).toFixed(2), 's',
-                 s.p50_ms == null ? '' : `P50 ${(s.p50_ms / 1000).toFixed(2)}s · 样本 ${s.count}`)}
-        ${metric('模型调用成功率', 'BY CALL', s.model_success_rate, '%',
-                 `${s.model_calls} 次调用 · ${s.model_failures || 0} 次失败${
-                   s.failed_traces ? ` · ${s.failed_traces} 条链路中断` : ''}`,
-                 grade(s.model_success_rate, 99, 95))}
-        ${metric('工具调用成功率', 'BY CALL', s.tool_success_rate, '%',
-                 `${s.tool_calls} 次调用 · ${s.tool_failures} 次失败`, grade(s.tool_success_rate, 95, 85))}
-        ${metric('链路完成率', 'NO CUTOFF', s.chain_completion_rate, '%',
-                 s.degraded_traces ? `${s.degraded_traces} 条未走主路径` : '全部正常收口',
-                 grade(s.chain_completion_rate, 95, 85))}
-        ${metric('平均 Token', 'PER TASK', s.avg_tokens, '', `${s.count} 条链路均值`)}
-        ${metric('单次成本', 'CNY', s.avg_cost == null ? null : '¥' + s.avg_cost.toFixed(4), '',
-                 `累计 ¥${(s.total_cost || 0).toFixed(4)}`)}
-      </div></section>
+    <section class="blk">${hd('链路概况', '进程内留存 · 重启即清空 · 聚合指标看 Agent 质量中心')}
+      <div id="tnav"></div></section>
 
     <div class="md">
       <div class="panel">
