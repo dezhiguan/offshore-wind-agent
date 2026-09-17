@@ -138,7 +138,8 @@ def ask_stream(req: AskRequest) -> StreamingResponse:
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    # 与 /admin 同理，页面不缓存，见 admin._NO_STORE 处的说明
+    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
