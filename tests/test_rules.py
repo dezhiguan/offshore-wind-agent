@@ -60,6 +60,22 @@ class TestPriorityRequired:
         assert "WO-260705" in r["verdict"]
         assert "2.1" in r["clauses"]
 
+    def test_safety_chain_also_cites_remote_reset_ban(self):
+        """急停成立 = 第 4.1 条第 1 款成立，条款直接规定，不该等模型想起来再调一次规则。
+
+        实测同一道题两次问：一次调了 remote_reset_ban 援引到第 4.1 条，一次没调就没有。
+        而"急停禁止远程强制复位"恰恰是这类问题最不该看模型发挥的那一条。
+        """
+        r = check_rule("priority_required", turbine_id="T05", fault_code="24005")
+        assert "4.1" in r["clauses"]
+        assert "禁止远程强制复位" in r["verdict"]
+
+    def test_non_safety_chain_does_not_claim_reset_ban(self):
+        """反过来也要守住：不是安全链类就不能顺手挂上第 4.1 条。"""
+        r = check_rule("priority_required", turbine_id="T03", fault_code="24002")
+        assert "4.1" not in r["clauses"]
+        assert "禁止远程强制复位" not in r["verdict"]
+
     def test_repeat_fault_requires_high(self):
         r = check_rule("priority_required", turbine_id="T03", fault_code="24002")
         assert r["required_priority"] == "HIGH"
@@ -72,6 +88,12 @@ class TestPriorityRequired:
 
 
 class TestWorkOrderAssessment:
+    def test_inherits_clauses_from_priority_judgement(self):
+        """① 优先级整项来自 priority_required，它援引的条款不该因为隔了一层函数就消失。"""
+        r = check_rule("work_order_assessment", turbine_id="T05", fault_code="24005")
+        assert {"2.1", "4.1"} <= set(r["clauses"])
+
+
     def test_missing_work_order_is_explicit_not_silent(self):
         """T07/24012 数据库里没有工单——必须显式说「不存在」，不能让模型去编。"""
         r = check_rule("work_order_assessment", turbine_id="T07", fault_code="24012")
