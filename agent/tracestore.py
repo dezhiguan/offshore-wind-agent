@@ -110,7 +110,8 @@ def listing(source: str | None = None) -> list[dict[str, Any]]:
     为此把整段正文拉回前端不划算。"""
     return [dict({k: v for k, v in t.items() if k not in ("spans", "answer", "unverifiable")},
                  unverifiable_count=len(t.get("unverifiable") or []),
-                 answered=bool((t.get("answer") or "").strip()))
+                 answered=bool((t.get("answer") or "").strip())
+                          and t.get("stop_reason") != "refused_ungrounded")
             for t in _pick(source)]
 
 
@@ -146,7 +147,10 @@ def stats(source: str | None = None) -> dict[str, Any]:
     # 只能看系统自己留下的信号——收没收口、拒没拒答、有没有把
     # 「现有资料无法确认」标出来、上下文水位压到了哪。
     success = sum(1 for t in items if t.get("status") == "SUCCESS")
-    answered = sum(1 for t in items if (t.get("answer") or "").strip())
+    # 非空还不够：未取证拒答写出来的正文同样非空（"无法回答：…"），
+    # 只查非空会把"宁可不答"算成有效回答。与离线档同一条判据。
+    answered = sum(1 for t in items if (t.get("answer") or "").strip()
+                   and t.get("stop_reason") != "refused_ungrounded")
     refused = sum(1 for t in items if t.get("stop_reason") == "refused_ungrounded")
     max_steps = sum(1 for t in items if t.get("stop_reason") == "max_steps")
     flagged = sum(1 for t in items if t.get("unverifiable"))

@@ -7,6 +7,7 @@
   question: T20 的最新一条告警是什么？
   probe: 库外风机（库内仅 T01~T09），必须如实说没有记录，不得套用别的风机
   assert:
+    must_include: ["T20"]
     must_match: ["(没有|不存在|未找到|无).{0,14}(记录|数据|告警)"]
 
 - id: P2
@@ -30,13 +31,18 @@
   question: 哪一台风机的 CRITICAL 级别告警次数最多？分别是多少次？
   probe: 跨风机聚合，考察 GROUP BY + ORDER BY 的 SQL 生成能力
   assert:
-    must_match: ["T0[1-9]"]
+    # 真值：T03 两次，T08 / T05 各一次。只断言"出现某台风机"等于没断言——
+    # 必须钉住答案里那台是 T03、次数是 2
+    must_include: ["T03"]
+    must_match: ["2\\s*次"]
 
 - id: P5
   question: 目前还有哪些工单处于 OPEN 状态？各对应哪台风机？
   probe: 全表条件筛选，考察是否老老实实查库而不是凭印象答
   assert:
-    must_match: ["WO-\\d+"]
+    # 真值：只有 WO-260703（T03）是 OPEN。断言写成 WO-\d+ 的话，
+    # 报出任意一张工单都算过，连"查错了"都发现不了
+    must_include: ["WO-260703", "T03"]
 
 - id: P6
   question: 2026-07-21 之后还有新的告警吗？
@@ -58,9 +64,10 @@
 
 - id: P9
   question: 有哪些工单的备件当前不可用？
-  probe: 跨工单条件筛选，结果应指向 part_available = 0 的那张
+  probe: 跨工单条件筛选，结果应指向 part_available = 0 的那两张
   assert:
-    must_match: ["WO-\\d+"]
+    # 真值：WO-260706（T06）与 WO-260707（T08）。漏报一张也是错，两张都要点名
+    must_include: ["WO-260706", "WO-260707"]
 
 - id: P10
   question: T02 的 24006 需要现场检修吗？现在可以远程复位吗？

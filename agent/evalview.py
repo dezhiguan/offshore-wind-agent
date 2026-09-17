@@ -141,6 +141,10 @@ def load() -> dict[str, Any]:
             blob = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
+        # 落盘时间用文件 mtime：产物本身不记跑测时刻，而"这批结果是不是同一次跑的"
+        # 恰恰要靠它——25 条来自凌晨那轮、1 条是几小时后单独重跑，混在一起算平均
+        # 却不作声，看的人会把拼盘当成一次完整评测
+        stamped = path.stat().st_mtime
         stored_case = blob.get("case", {})
         cid = stored_case.get("id") or path.stem
         result = blob.get("result", {})
@@ -164,6 +168,8 @@ def load() -> dict[str, Any]:
             "doc_chars_pct": budget.get("doc_chars_pct"),
             "sources": result.get("sources", []),
             "model": meta.get("model"),
+            "grounding": (meta.get("grounding") or {}).get("mode"),
+            "at_ts": stamped,
             "tool_calls": ts.get("tool_calls"),
             "tool_failures": ts.get("tool_failures"),
             "tool_success_rate": ts.get("tool_success_rate"),
@@ -197,6 +203,25 @@ def load() -> dict[str, Any]:
             "median_ms": sorted(i["elapsed_ms"] or 0 for i in group)[len(group) // 2],
         })
 
+    stamps = sorted(i["at_ts"] for i in items if i.get("at_ts"))
+    models = sorted({i["model"] for i in items if i.get("model")})
+    grounds = sorted({i["grounding"] for i in items if i.get("grounding")})
+    batch = {}
+    if stamps:
+        newest = stamps[-1]
+        batch = {
+            "first_at": datetime.fromtimestamp(stamps[0]).strftime("%m-%d %H:%M"),
+            "last_at": datetime.fromtimestamp(newest).strftime("%m-%d %H:%M"),
+            "span_minutes": int((newest - stamps[0]) / 60),
+            # 最后十分钟内落盘的算"最近这一轮"，其余是更早留下的
+            "recent": sum(1 for t in stamps if newest - t <= 600),
+            "total": len(stamps),
+            "models": models,
+            "groundings": grounds,
+            # 模型或接地档位不止一种 = 这张表在跨配置求平均，指标不可当作一次评测
+            "mixed": len(models) > 1 or len(grounds) > 1,
+        }
+
     pcts_row = [i["db_rows_pct"] for i in items if i["db_rows_pct"] is not None]
     pcts_doc = [i["doc_chars_pct"] for i in items if i["doc_chars_pct"] is not None]
     return {
@@ -204,6 +229,7 @@ def load() -> dict[str, Any]:
         "summary": summary,
         "metrics": metrics(items),
         "trend": trend(),
+        "batch": batch,
         "totals": {
             "total": len(items),
             "passed": sum(1 for i in items if i["ok"]),
@@ -239,11 +265,20 @@ def metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
     # 结果准确率：断言全部命中才算对。断言写法约定见 eval/cases.yaml 头部。
     passed = sum(1 for i in items if i["ok"])
 
-    # 任务完成率：产出了非空回答（未因未取证被拒、未因异常中断）
-    completed = sum(1 for i in items if (i.get("answer") or "").strip())
+    # 任务完成率：产出了**可用**回答。非空还不够——未取证拒答走的也是正常出文路径，
+    # 正文写的是"## 结论 无法回答：本系统要求所有结论必须有随题资料支撑…"，同样非空。
+    # 只查非空会把"宁可不答"算成"任务完成"，把护栏生效记成业务成功。
+    refused = sum(1 for i in items if i.get("stop_reason") == "refused_ungrounded")
+    completed = sum(1 for i in items
+                    if (i.get("answer") or "").strip()
+                    and i.get("stop_reason") != "refused_ungrounded")
 
-    # 链路完成率：正常收口，未撞步数上限、未被拒答
+    # 链路完成率：正常收口，未撞步数上限、未被拒答。
+    # 注意它**不看**链路内部有没有降级：工具报错后模型自己纠正、护栏打回后重新取证，
+    # 都仍是正常收口。这类链路单独数出来放进注脚——否则 100% 会被读成"全程无异常"。
     normal = sum(1 for i in items if i.get("stop_reason") == "completed")
+    rough = sum(1 for i in items
+                if any(s.get("status") in ("ERROR", "DEGRADED") for s in (i.get("spans") or [])))
 
     # 工具调用成功率：按调用次数加权，不是按用例平均——
     # 按用例平均会让只调一次工具的简单题和调十次的复杂题权重相同。
@@ -256,11 +291,14 @@ def metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
 
     return {
         "result_accuracy": {"value": _pct(passed, n), "note": "%d / %d 条断言全中" % (passed, n)},
-        "task_completion": {"value": _pct(completed, n), "note": "%d / %d 条产出非空回答" % (completed, n)},
+        "task_completion": {"value": _pct(completed, n),
+                            "note": "%d / %d 条产出可用回答%s" % (
+                                completed, n, "（拒答 %d 条不计）" % refused if refused else "")},
         "tool_success": {"value": _pct(tc - tf, tc) if tc else None,
                          "note": "%d 次调用 · %d 次失败" % (tc, tf) if tc else "无数据"},
         "chain_completion": {"value": _pct(normal, n),
-                             "note": "%d / %d 条正常收口（未撞步数上限）" % (normal, n)},
+                             "note": "%d / %d 条正常收口（未撞步数上限）%s" % (
+                                 normal, n, "· 其中 %d 条链路内有降级或工具失败" % rough if rough else "")},
         "p95_latency_ms": {"value": _p95(lat),
                            "note": ("P50 %.1fs · 样本 %d" % (statistics.median(lat) / 1000, len(lat)))
                                    if lat else "无数据"},
