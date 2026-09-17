@@ -58,6 +58,25 @@ _CLAUSE_NO = re.compile(r"第\s*(\d+(?:\.\d+)?)\s*条")
 K1, B = 1.5, 0.75
 CODE_BOOST, CLAUSE_BOOST, TITLE_BOOST = 5.0, 5.0, 3.0
 
+# 停用词：只收虚词，不收任何领域词。
+#
+# 不加这张表时，BM25 的 idf 在小语料上会**倒挂**：全库只有 34 个小节，「才」只出现在
+# 1 节里（idf 3.15），而「告警」出现在 20 节（idf 0.95）—— 虚词的权重反而高过术语。
+# 实测「弄完之后要盯多久才算数」的 top1 是「24006 低穿激活」，唯一贡献词是「才」。
+# 这是缺陷不是调优，而且这张表不随语料增长：加多少份手册，中文虚词还是这几十个。
+#
+# 「要求」「记录」「状态」「条件」「处理」「情形」这类词有领域含义（第 3.3 条 处理要求、
+# 第 6.1 条 必备记录），一律不进表。
+STOPWORDS = frozenset("""
+的 了 吗 呢 吧 是 不 也 就 都 还 又 才 很 太 在 有 和 与 及 对 把 被 给 让 从 到 个 这 那
+什么 怎么 哪些 哪 如果 需要 应该 可以 能 要 会 没 没有 之后 之前 自己 是不是 说明 情况
+时候 进行 一下 我们 你 我 它 其 以及 或 等 上 下 里 中 做 好 多久 算数 一个 一样 直接
+""".split())
+
+# 低置信阈值：top1 得分低于此值时，检索结果大概率没捞到该捞的那节。
+# 这是**告警**不是拦截 —— 只写进结果与链路，不改变返回内容，避免误伤真实答案。
+LOW_SCORE = 2.0
+
 
 @dataclass
 class Chunk:
@@ -75,8 +94,17 @@ class Chunk:
         return "%s › %s" % (self.chapter, self.title) if self.chapter else self.title
 
 
-def tokenize(text: str) -> list[str]:
-    return [t.lower() for t in jieba.lcut(text) if t.strip() and not _PUNCT.match(t)]
+def tokenize(text: str, keep_stopwords: bool = False) -> list[str]:
+    """分词并去虚词。建索引与查询走同一条口径，否则 df 与 tf 对不上。"""
+    out = []
+    for t in jieba.lcut(text):
+        if not t.strip() or _PUNCT.match(t):
+            continue
+        t = t.lower()
+        if not keep_stopwords and t in STOPWORDS:
+            continue
+        out.append(t)
+    return out
 
 
 def _split_sections(raw: str, doc: str) -> list[Chunk]:
@@ -177,6 +205,41 @@ class Index:
         scored.sort(key=lambda x: (-x[0], x[1].section_id))
         return [_hit(c, s) for s, c in scored[:top_k]]
 
+    def diagnose(self, query: str, hits: list[dict[str, Any]]) -> dict[str, Any]:
+        """标注这次检索的可信程度。**判据是标定过的，不是拍的。**
+
+        起因：漏召回原本完全静默 —— 链路显示「命中 4 节」，绿的，而该命中的那节
+        排在第 9、第 12。检索质量退化没有任何人会发现。
+
+        标定过程（45 条真实链路检索词，28 条捞到 / 17 条漏了）证伪了三个候选判据：
+            top_score    捞到 3.59~21.27，漏了 0.00~10.58  —— 完全重叠
+            词项覆盖率   两边中位数都是 1.00              —— 不可分
+            未识别词数   捞到中位 1，漏了中位 2            —— 不可分
+        按 unknown_terms 报警会标掉 73% 的查询（其中 25 条其实是对的），
+        全黄等于全不黄；而且仍漏报 6 条。
+
+        结论：**单条查询自身分不出「漏没漏」** —— 能否命中取决于语料里有没有别的
+        小节把它挤下去，不是查询的属性。所以这里只报无歧义的情形（无命中 / 得分为 0），
+        其余一律降级为信息字段，不下判断。成体系的召回退化要靠探针集回归
+        （tests/test_retriever_recall.py），那才是真正让漏召回可观测的地方。
+        """
+        terms = tokenize(query)
+        unknown = sorted({t for t in terms if self.df.get(t, 0) == 0})
+        top = hits[0]["score"] if hits else 0.0
+        reasons = []
+        if not hits:
+            reasons.append("无命中")
+        elif top <= 0:
+            reasons.append("最高分为 0")
+        return {
+            "status": "low_confidence" if reasons else "ok",
+            "top_score": round(top, 3),
+            # 信息字段：解释「为什么可能没捞到」，但不作为报警判据（标定证明不可分）
+            "unknown_terms": unknown,
+            "reasons": reasons,
+            "hint": "换用故障代码、条款号或规程原文用词重试" if reasons else None,
+        }
+
     def get_section(self, doc: str, section_id: str) -> dict[str, Any]:
         doc_key = DOC_ALIASES.get(doc, doc)
         sid = section_id.strip()
@@ -239,11 +302,14 @@ def get_index() -> Index:
 
 
 def search_docs(query: str, doc: str | None = None, top_k: int = 4) -> dict[str, Any]:
-    hits = get_index().search(query, doc=doc, top_k=top_k)
+    index = get_index()
+    hits = index.search(query, doc=doc, top_k=top_k)
+    recall_check = index.diagnose(query, hits)
     return {
         "ok": True,
         "query": query,
         "hits": hits,
+        "recall_check": recall_check,
         "note": "未检索到相关章节，可换用故障代码或条款号重试。" if not hits else None,
     }
 

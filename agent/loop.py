@@ -254,7 +254,16 @@ def _summarize(name: str, result: dict[str, Any]) -> str:
         return "命中 %d 行" % n if n else "无匹配记录"
     if name == "search_docs":
         hits = result.get("hits", [])
-        return "命中 %d 节：%s" % (len(hits), "、".join(h["title"][:24] for h in hits[:3])) if hits else "未命中"
+        check = result.get("recall_check") or {}
+        # 漏召回原来是静默的：显示「命中 4 节」，绿的，而该命中的那节不在里面。
+        # 把判据摊开写进摘要，退化才看得见。
+        warn = ""
+        if check.get("status") == "low_confidence":
+            warn = "（低置信：%s）" % "；".join(check.get("reasons") or [])
+        if not hits:
+            return "未命中%s" % warn
+        return "命中 %d 节：%s%s" % (
+            len(hits), "、".join(h["title"][:24] for h in hits[:3]), warn)
     if name == "get_doc_section":
         return "取回《%s》%s" % (result.get("doc", ""), result.get("title", ""))
     if name == "check_rule":

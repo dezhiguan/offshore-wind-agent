@@ -512,6 +512,54 @@ REQUIRED_ARGS = {
     "replace_precondition": ("work_order_id",),
 }
 
+# 泛问时该给什么：规则覆盖的条款全集。
+#
+# 起因是一次实测：用户问「仓库里有备件是不是就可以直接开工了」——这是**泛问**，
+# 不绑定任何工单，于是 check_rule 报「缺少必填参数 work_order_id」直接缺席，
+# 判定只能退回文档检索，而第 7.3 条（备件可用不等于允许作业）在 BM25 里排第 12，
+# 没进上下文。同理「断电重启之后报警没了，这单子能结吗」漏掉第 6.2 条。
+#
+# 这两条恰恰是泛问的正确答案。规则引擎明明知道自己管哪几条，却因为缺一个 id
+# 而一句话不说 —— 缺的是判定对象，不是条款。所以缺参数时不再报错，
+# 改为给出通则条款原文，并明确声明「未针对具体对象判定」。
+GENERAL_CLAUSES = {
+    "repeat_fault": ["3.1", "3.2", "3.3"],
+    "priority_required": ["2.1", "2.2", "2.3", "2.4"],
+    "work_order_assessment": ["2.4", "7.1", "7.2"],
+    "remote_reset_ban": ["4.1", "4.2", "3.3"],
+    "close_compliance": ["6.1", "6.2", "6.3", "6.4", "6.5"],
+    "replace_precondition": ["5.1", "5.2", "5.3", "7.1", "7.2", "7.3"],
+}
+
+GENERAL_TITLES = {
+    "repeat_fault": "重复故障认定与升级",
+    "priority_required": "工单优先级",
+    "work_order_assessment": "工单安排复核",
+    "remote_reset_ban": "禁止远程复位",
+    "close_compliance": "工单关闭合规性",
+    "replace_precondition": "单板 / 通讯模块更换",
+}
+
+
+def _general_answer(rule: str, missing: list[str]) -> dict[str, Any]:
+    """缺判定对象时给通则，而不是给一句错误。"""
+    return {
+        "ok": True,
+        "rule": rule,
+        "is_general": True,
+        "missing_args": missing,
+        "verdict": (
+            "未指定 %s，以下是规程对「%s」的通则要求，**未针对任何具体工单或风机作出判定**。"
+            "需要判定具体对象时，请先查出 %s 再调用本规则。"
+            % ("、".join(missing), GENERAL_TITLES.get(rule, rule), "、".join(missing))
+        ),
+        "facts": {},
+        "unverifiable": ["本次只给出通则条款，未核对任何记录；"
+                         "具体对象是否合规必须另行按 id 判定"],
+        "clauses": list(GENERAL_CLAUSES.get(rule, ())),
+    }
+
+
 RULES = {
     "repeat_fault": repeat_fault,
     "priority_required": priority_required,
@@ -598,9 +646,10 @@ def check_rule(rule: str, **kwargs) -> dict[str, Any]:
     args = {k: v for k, v in kwargs.items() if k in accepted and v is not None}
     missing = [a for a in REQUIRED_ARGS.get(rule, ()) if a not in args]
     if missing:
-        return {"ok": False,
-                "error": "规则 %s 缺少必填参数：%s。请先查出这些值再调用本规则。"
-                         % (rule, "、".join(missing))}
+        # 缺的是判定对象，不是条款 —— 给通则，别让规则引擎在泛问上整个缺席
+        result = _general_answer(rule, missing)
+        result["sources"] = ["safety_regulation"]
+        return _attach_clause_texts(result)
     try:
         return _attach_clause_texts(_run_tracking_sources(fn, args))
     except RuleInputError as exc:

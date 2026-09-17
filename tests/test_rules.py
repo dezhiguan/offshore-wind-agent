@@ -189,3 +189,46 @@ class TestDeclaredSources:
         # 查无告警时在比对工单之前就返回了，工单表这一次没碰过
         r = check_rule("priority_required", turbine_id="T01", fault_code="24999")
         assert "maintenance_records" not in (r.get("sources") or [])
+
+
+class TestGeneralQuestionMode:
+    """泛问不绑定具体对象时，规则引擎给通则而不是缺席。
+
+    起因是两次实测漏依据：
+      「仓库里有备件是不是就可以直接开工了」—— check_rule 报「缺少 work_order_id」
+        直接缺席，判定退回文档检索，而第 7.3 条在 BM25 里排第 12，没进上下文。
+      「断电重启之后报警没了，这单子能结吗」—— 同理漏掉第 6.2 条。
+    缺的是判定对象，不是条款；规则引擎明明知道自己管哪几条。
+    """
+
+    def test_missing_id_returns_general_clauses_not_error(self):
+        result = check_rule("replace_precondition")
+        assert result["ok"] is True
+        assert result["is_general"] is True
+        assert "7.3" in result["clauses"], "备件可用不等于允许作业，泛问时必须给出"
+        assert "work_order_id" in result["missing_args"]
+
+    def test_close_compliance_general_covers_restart_only(self):
+        result = check_rule("close_compliance")
+        assert "6.2" in result["clauses"], "「重新上电后故障消失」不得单独作为关闭依据"
+
+    def test_general_answer_carries_clause_texts(self):
+        """原文要一起给，否则模型还得再 get_doc_section 取一遍。"""
+        result = check_rule("replace_precondition")
+        assert "第 7.3 条" in result.get("clause_texts", {})
+        assert [s["section_id"] for s in clause_sections(result)]
+
+    def test_general_answer_states_it_judged_nothing(self):
+        """最危险的误用是把通则当成对某张工单的判定，措辞必须堵死。"""
+        result = check_rule("close_compliance")
+        assert "未针对任何具体工单或风机作出判定" in result["verdict"]
+        assert result["facts"] == {}
+
+    def test_specific_id_still_runs_real_judgement(self):
+        """泛问模式不能把正常判定带跑偏。"""
+        result = check_rule("close_compliance", work_order_id="WO-260701")
+        assert result.get("is_general") is None
+        assert result["facts"]["工单"]["work_order_id"] == "WO-260701"
+
+    def test_unknown_rule_still_errors(self):
+        assert check_rule("no_such_rule")["ok"] is False
