@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>海上风电机组维检 Agent</title>
+<style>
+:root{
+  --ground:#F2F5F6; --surface:#fff; --surface-2:#EBF0F2;
+  --ink:#0F1A1F; --ink-2:#3D4E56; --muted:#6B7C84;
+  --line:#D5DEE1; --accent:#0B6B74; --accent-soft:#E2F0F1;
+  --warn:#8F5406; --warn-soft:#FBF1DE; --crit:#A82A25; --ok:#2C6A4E;
+  --mono:"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --ground:#0A1215; --surface:#111B1F; --surface-2:#17242A;
+  --ink:#E6EDEF; --ink-2:#B3C2C8; --muted:#8598A0;
+  --line:#223238; --accent:#4FBFC8; --accent-soft:#0E2B2E;
+  --warn:#D9A044; --warn-soft:#2B2113; --crit:#E8827A; --ok:#74C49B;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);
+  font:15px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:940px;margin:0 auto;padding:32px 20px 80px}
+header{border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:22px}
+h1{font-size:1.5rem;margin:0 0 6px}
+.sub{color:var(--muted);font-size:13.5px;margin:0}
+
+.cap{background:var(--surface);border:1px solid var(--line);border-radius:8px;
+  padding:16px 18px;margin-bottom:18px}
+.cap h2{font-size:.95rem;margin:0 0 10px}
+.cap-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}
+.cap-col b{display:block;font-size:11px;letter-spacing:.1em;color:var(--muted);
+  text-transform:uppercase;margin-bottom:5px;font-family:var(--mono)}
+.cap-col ul{margin:0;padding-left:1.1em;font-size:13px;color:var(--ink-2)}
+.cap-col li{margin-bottom:3px}
+.cap-col.no li::marker{color:var(--crit)}
+
+.ex{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}
+.ex button{font:inherit;font-size:12.5px;padding:5px 11px;cursor:pointer;
+  background:var(--surface-2);color:var(--ink-2);border:1px solid var(--line);border-radius:14px}
+.ex button:hover{border-color:var(--accent);color:var(--accent)}
+
+form{display:flex;gap:10px;align-items:flex-end;margin-bottom:8px}
+textarea{flex:1;min-height:62px;font:inherit;padding:11px 13px;resize:vertical;
+  background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:8px}
+button.go{font:inherit;padding:11px 24px;cursor:pointer;background:var(--accent);
+  color:#fff;border:0;border-radius:8px}
+button.go:disabled{opacity:.5;cursor:default}
+.note{color:var(--muted);font-size:12px;margin:0 0 22px}
+
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px;
+  padding:16px 18px;margin-bottom:14px}
+.card > h3{font-size:.85rem;font-family:var(--mono);letter-spacing:.08em;
+  text-transform:uppercase;color:var(--muted);margin:0 0 10px;font-weight:600}
+.answer{font-size:15.5px;white-space:pre-wrap}
+.answer strong{color:var(--ink)}
+
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{font-size:12px;font-family:var(--mono);padding:3px 9px;border-radius:4px;
+  background:var(--accent-soft);color:var(--accent);border:1px solid var(--line)}
+
+.alert{border-left:3px solid var(--warn);background:var(--warn-soft);
+  border-radius:0 8px 8px 0;padding:14px 18px;margin-bottom:14px}
+.alert h3{margin:0 0 6px;font-size:.9rem;color:var(--warn)}
+.alert ul{margin:0;padding-left:1.2em;font-size:13.5px}
+.alert.err{border-left-color:var(--crit);background:transparent;border:1px solid var(--crit)}
+.alert.err h3{color:var(--crit)}
+
+ol.steps{margin:0;padding-left:0;list-style:none;counter-reset:s}
+ol.steps li{counter-increment:s;display:flex;gap:10px;padding:6px 0;
+  border-bottom:1px dashed var(--line);font-size:13px}
+ol.steps li:last-child{border-bottom:0}
+ol.steps li::before{content:counter(s);font-family:var(--mono);font-size:11px;
+  background:var(--surface-2);color:var(--muted);width:19px;height:19px;flex:0 0 19px;
+  border-radius:4px;display:flex;align-items:center;justify-content:center;margin-top:2px}
+.tool{font-family:var(--mono);font-size:12px;color:var(--accent);flex:0 0 132px}
+.sum{color:var(--ink-2);min-width:0;word-break:break-word}
+.bad{color:var(--crit)}
+
+details{border:1px solid var(--line);border-radius:6px;margin-bottom:8px;background:var(--surface)}
+summary{cursor:pointer;padding:9px 13px;font-size:13px;color:var(--ink-2)}
+summary b{font-family:var(--mono);font-size:12px;color:var(--accent);font-weight:600}
+details .body{padding:0 13px 13px}
+pre{font-family:var(--mono);font-size:12px;background:var(--surface-2);
+  padding:10px 12px;border-radius:5px;overflow-x:auto;margin:0 0 9px}
+table{border-collapse:collapse;width:100%;font-size:12.5px;font-family:var(--mono)}
+/* 收窄到证据表：裸 th,td 会把 span 表也一起 nowrap，
+   而 nowrap 下 overflow-wrap 完全失效，长 SQL 会横穿整行压到别的列上 */
+.det-table th,.det-table td{text-align:left;padding:5px 9px;
+  border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--muted);font-weight:600}
+.scroll{overflow-x:auto}
+.doctext{font-size:13px;white-space:pre-wrap;color:var(--ink-2);
+  max-height:290px;overflow-y:auto;line-height:1.65}
+.meta{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:14px}
+
+.live{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin-bottom:14px}
+.live h3{font-size:.85rem;font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted);margin:0 0 10px;font-weight:600}
+.live .tick{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:10px}
+.draft{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin-bottom:14px}
+.draft h3{font-size:.85rem;font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted);margin:0 0 10px;font-weight:600}
+.draft .body{font-size:15px;white-space:pre-wrap;line-height:1.72}
+.draft .sec{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--muted);font-weight:600;margin:14px 0 4px}
+.draft .sec:first-child{margin-top:0}
+.draft .caret{display:inline-block;width:7px;height:1.05em;background:var(--accent);
+  vertical-align:-2px;animation:blink .9s step-end infinite}
+@keyframes blink{50%{opacity:0}}
+@media (prefers-reduced-motion:reduce){.draft .caret{animation:none}}
+ol.steps li.pending{opacity:.62}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line);
+  border-top-color:var(--accent);border-radius:50%;animation:r .7s linear infinite;
+  vertical-align:-2px;margin-right:7px}
+@keyframes r{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>海上风电机组维检 Agent</h1>
+  <p class="sub">自然语言询问风机状态、告警、工单安排、故障处理办法与作业合规性</p>
+
+</header>
+
+<section class="cap">
+  <h2>本系统能做什么</h2>
+  <div class="cap-grid">
+    <div class="cap-col">
+      <b>可以回答</b>
+      <ul>
+        <li>风机型号、运行状态、最近一次告警</li>
+        <li>指定时间段内的告警记录</li>
+        <li>故障原理、触发条件、排查步骤</li>
+        <li>工单优先级、状态、备件与观察时间</li>
+        <li>重复故障、远程复位、关单与换板的合规判定</li>
+      </ul>
+    </div>
+    <div class="cap-col no">
+      <b>无法回答</b>
+      <ul>
+        <li>现场安全条件（母线电压、挂牌上锁、验电等）</li>
+        <li>责任归属与调查结论</li>
+        <li>备件实物库存与到货时间</li>
+        <li>海况、天气与人员资质</li>
+      </ul>
+      <p style="font-size:12.5px;color:var(--muted);margin:7px 0 0">
+        以上事项随题资料均无记录，系统会明确标注「需要现场核实」，不会推测。</p>
+    </div>
+  </div>
+  <div class="ex" id="ex"></div>
+</section>
+
+<form id="f">
+  <textarea id="q" placeholder="例：T03 的 24002 在 2026-07-18 08:00:00 至 2026-07-19 08:00:00 内发生了多少次？是否属于重复故障？"></textarea>
+  <button class="go" id="go" type="submit">提问</button>
+</form>
+<p class="note">时间范围一律按<b>闭区间</b>理解；数据覆盖 2026-07-01 00:00:00 ~ 2026-07-20 23:59:59。</p>
+
+<div id="out"></div>
+
+</div>
+<script>
+const EXAMPLES = [
+  "T06 的风机型号是什么？最新一条告警记录对应的运行状态和发生时间是什么？",
+  "T04 在 2026-07-10 00:00:00 至 2026-07-15 23:59:59 期间有哪些告警？",
+  "24002_SC_变流器心跳 的常见原因有哪些？更换通讯模块前最重要的安全注意事项是什么？",
+  "规程规定哪些情形禁止远程强制复位？",
+  "T03 的 24002 是否属于重复故障？当前 NORMAL 工单应调整为什么优先级？",
+  "T09 的 24011 已完成工单是否符合关闭要求？15 分钟观察时间够吗？",
+  "T08 的 24010 是否已经具备立即更换控制单板的条件？",
+];
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+// 模型按 Markdown 输出，这里只渲染粗体和行内代码两种。先转义再替换，不引 Markdown 库：
+// 依赖越少，对方 clone 下来越不容易跑不起来。
+const md = s => esc(s)
+  .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  .replace(/`([^`]+)`/g, '<code style="font-family:var(--mono);font-size:12.5px;background:var(--surface-2);padding:1px 4px;border-radius:3px">$1</code>');
+// 流式阶段答案还没被解析成三段，模型输出的 `## 结论` 会原样显示。
+// 这里把二级标题渲染成小标签，边写边读也是完整的排版。
+const mdLive = s => md(s)
+  // 尾部 \n* 一并吃掉：标题是块级元素，pre-wrap 会把它后面的空行原样留成一大块空白
+  .replace(/^#{2,4}\s*(.+?)[ \t]*$\n*/gm, '<span class="sec">$1</span>');
+
+EXAMPLES.forEach(t => {
+  const b = document.createElement('button');
+  b.type = 'button'; b.textContent = t.length > 30 ? t.slice(0, 29) + '…' : t;
+  b.title = t;
+  b.onclick = () => { $('#q').value = t; $('#q').focus(); };
+  $('#ex').appendChild(b);
+});
+
+function rows(t) {
+  if (!t.rows || !t.rows.length) return '<p style="font-size:13px;color:var(--muted);margin:0">查询无匹配记录。</p>';
+  const cols = t.columns || Object.keys(t.rows[0]);
+  return '<div class="scroll"><table class="det-table"><thead><tr>' + cols.map(c => `<th>${esc(c)}</th>`).join('') +
+    '</tr></thead><tbody>' + t.rows.map(r =>
+      '<tr>' + cols.map(c => `<td>${esc(r[c])}</td>`).join('') + '</tr>').join('') +
+    '</tbody></table></div>';
+}
+
+function render(d) {
+  const P = [];
+
+  if (d.meta?.replay) P.push(`<div class="alert"><h3>离线回放模式</h3><p style="margin:0;font-size:13.5px">
+    当前无外网连接，展示的是用例 <b>${esc(d.meta.replay.matched_case)}</b> 的已保存链路结果
+    （原问题：${esc(d.meta.replay.matched_question)}）。实时链路需要访问模型接口。</p></div>`);
+
+  P.push(`<div class="card"><h3>回答</h3><div class="answer">${md(d.answer)}</div></div>`);
+
+  if (d.unverifiable?.length) P.push(`<div class="alert"><h3>现有资料无法确认，需要现场核实</h3><ul>${
+    d.unverifiable.map(u => `<li>${md(u)}</li>`).join('')}</ul></div>`);
+
+  if (d.sources?.length) P.push(`<div class="card"><h3>使用的数据源</h3><div class="chips">${
+    d.sources.map(s => `<span class="chip">${esc(s)}</span>`).join('')}</div></div>`);
+
+  if (d.basis?.length) P.push(`<div class="card"><h3>结论依据</h3><ul style="margin:0;padding-left:1.2em;font-size:13.5px">${
+    d.basis.map(b => `<li>${md(b)}</li>`).join('')}</ul></div>`);
+
+  const ev = d.evidence || {};
+  const parts = [];
+  (ev.tables || []).forEach((t, i) => parts.push(
+    `<details><summary><b>数据表</b> · 查询 ${i + 1} · 命中 ${t.row_count ?? 0} 行</summary>
+     <div class="body"><pre>${esc(t.sql)}</pre>${rows(t)}</div></details>`));
+  (ev.rules || []).forEach(r => parts.push(
+    `<details><summary><b>规程判定</b> · ${esc(r.rule)} · ${esc((r.result?.clauses || []).map(c => '第 ' + c + ' 条').join('、'))}</summary>
+     <div class="body"><p style="font-size:13.5px;margin:0 0 8px">${md(r.result?.verdict)}</p>
+     <pre>${esc(JSON.stringify(r.result?.facts, null, 1))}</pre></div></details>`));
+  (ev.docs || []).forEach(x => parts.push(
+    `<details><summary><b>文档</b> · ${esc(x.doc)} · ${esc(x.title)}</summary>
+     <div class="body"><div class="doctext">${esc(x.text)}</div></div></details>`));
+  if (parts.length) P.push(`<div class="card"><h3>原始依据</h3>${parts.join('')}</div>`);
+
+  if (d.trace?.length) P.push(`<div class="card"><h3>查询过程</h3><ol class="steps">${
+    d.trace.map(t => `<li><span class="tool">${esc(t.tool)}</span><span class="sum${t.ok ? '' : ' bad'}">${esc(t.summary)}</span></li>`).join('')}</ol>
+    <p class="meta">共 ${d.meta?.steps ?? 0} 次工具调用 · 耗时 ${((d.meta?.elapsed_ms ?? 0) / 1000).toFixed(1)} 秒${
+      d.meta?.stop_reason === 'max_steps' ? ' · 已达步数上限，回答基于已取得的证据' : ''}${
+      d.meta?.format_parsed === false ? ' · 模型未按格式输出，已降级显示原文' : ''}
+</p></div>`);
+
+  return P.join('');
+}
+
+$('#f').onsubmit = async e => {
+  e.preventDefault();
+  const q = $('#q').value.trim();
+  if (!q) return;
+  $('#go').disabled = true;
+
+  const steps = [];
+  let note = '正在判断需要查询哪些资料…';
+  let draft = '';
+  const t0 = Date.now();
+  $('#out').innerHTML = liveView(steps, note, draft);
+  const timer = setInterval(() => {
+    const el = document.getElementById('tick');
+    if (el) el.textContent = `已用时 ${((Date.now() - t0) / 1000).toFixed(0)} 秒`;
+  }, 500);
+
+  const fail = (title, msg) => {
+    $('#out').innerHTML = `<div class="alert err"><h3>${esc(title)}</h3>
+      <p style="margin:0;font-size:13.5px">${esc(msg)}</p></div>`;
+  };
+
+  try {
+    const r = await fetch('/ask/stream', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question: q})});
+    if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
+
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const chunks = buf.split('\n\n');
+      buf = chunks.pop();
+      for (const chunk of chunks) {
+        const line = chunk.split('\n').find(l => l.startsWith('data:'));
+        if (!line) continue;
+        const ev = JSON.parse(line.slice(5).trim());
+        if (ev.type === 'token') {
+          draft += ev.text;
+          $('#out').innerHTML = liveView(steps, note, draft);
+        } else if (ev.type === 'step') {
+          steps.push(ev.step);
+          note = '正在继续取证…';
+          $('#out').innerHTML = liveView(steps, note, draft);
+        } else if (ev.type === 'answer_reset') {
+          // 服务端判定已渲染的内容并非最终答案，撤掉重来
+          draft = '';
+          $('#out').innerHTML = liveView(steps, note, draft);
+        } else if (ev.type === 'thinking' || ev.type === 'composing') {
+          note = ev.message;
+          $('#out').innerHTML = liveView(steps, note, draft);
+        } else if (ev.type === 'done') {
+          clearInterval(timer);
+          $('#out').innerHTML = render(ev.result);
+        } else if (ev.type === 'error') {
+          clearInterval(timer);
+          fail(ev.kind === 'not_configured' ? '系统未配置'
+             : ev.kind === 'replay_miss' ? '离线回放未匹配' : '查询失败', ev.error);
+        }
+      }
+    }
+  } catch (err) {
+    fail('请求失败', err + '；请确认服务仍在运行。');
+  } finally {
+    clearInterval(timer);
+    $('#go').disabled = false;
+  }
+};
+</script>
+</body>
+</html>

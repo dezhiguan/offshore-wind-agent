@@ -1,0 +1,1064 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>后台管理 · 海上风电机组维检 Agent</title>
+<style>
+/* ── 设计说明 ────────────────────────────────────────────────
+   控制台形态：深色左轨 + 亮色内容区。左轨承担身份与导航，内容区只放数据。
+   指标按语义分组并给不同权重——质量门禁是结论，执行健康是过程，
+   成本与延迟是代价，上下文红线是水位。四类性质不同，不该长成一样的卡片。
+   用量做成带阈值刻度的仪表：数字回答"多少"，仪表回答"离限还有多远"。
+   字体全部用系统栈，不引外部字体——现场可能断网。
+   ──────────────────────────────────────────────────────── */
+:root{
+  --rail:#2E4349; --rail-2:#3D565D; --rail-ink:#E9EFF0; --rail-muted:#9DB2B8;
+  --ground:#EDF1F2; --surface:#fff; --surface-2:#F3F6F7; --sunken:#E6ECEE;
+  --ink:#0C1619; --ink-2:#3B4C53; --muted:#6B7F86;
+  --line:#DDE5E7; --line-2:#C9D5D8;
+  --accent:#0A6C74; --accent-soft:#E0EFF0;
+  --ok:#2A6A4C; --ok-soft:#E3F0E9; --warn:#8C5205; --warn-soft:#FBF0DF;
+  --crit:#A3271F; --crit-soft:#F9E7E5;
+  --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif;
+  --mono:"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --r:10px;
+}
+@media (prefers-color-scheme:dark){:root{
+  --rail:#16262B; --rail-2:#22383F; --rail-ink:#E0EAEC; --rail-muted:#8AA1A8;
+  --ground:#0A1114; --surface:#121E22; --surface-2:#16242A; --sunken:#0E181C;
+  --ink:#E4EBED; --ink-2:#AFC0C6; --muted:#7E9299;
+  --line:#1F2E33; --line-2:#2B3E44;
+  --accent:#4FC0C9; --accent-soft:#0D2B2E;
+  --ok:#6FC194; --ok-soft:#11261C; --warn:#D49B3E; --warn-soft:#291F11;
+  --crit:#E07C73; --crit-soft:#2A1513;
+}}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--ground);color:var(--ink);font:14px/1.65 var(--sans);
+  -webkit-font-smoothing:antialiased}
+
+/* ── 左轨 ── */
+.shell{display:grid;grid-template-columns:1fr;min-height:100%}
+@media (min-width:920px){.shell{grid-template-columns:212px minmax(0,1fr)}}
+.rail{background:var(--rail);color:var(--rail-ink);padding:22px 16px;display:flex;
+  flex-direction:column;gap:22px}
+@media (min-width:920px){.rail{position:sticky;top:0;height:100vh}}
+.mark{display:flex;align-items:center;gap:9px}
+.mark .dot{width:9px;height:9px;border-radius:50%;background:#5FD3DA;flex:0 0 9px;
+  box-shadow:0 0 0 3px rgba(95,211,218,.2)}
+.mark .t{font-size:13.5px;font-weight:600;letter-spacing:.01em;line-height:1.35}
+.mark .t small{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--rail-muted);font-weight:400;margin-top:3px}
+.nav{display:flex;gap:6px;flex-direction:row;flex-wrap:wrap}
+@media (min-width:920px){.nav{flex-direction:column}}
+.nav button{font:inherit;display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+  padding:9px 11px;cursor:pointer;background:transparent;color:var(--rail-muted);
+  border:0;border-radius:8px;transition:background .13s,color .13s}
+.nav button:hover{background:var(--rail-2);color:var(--rail-ink)}
+.nav button.on{background:var(--rail-2);color:var(--rail-ink)}
+.nav button .ic{width:16px;height:16px;flex:0 0 16px;opacity:.8}
+.nav button .lb{font-size:13.5px;font-weight:500}
+.nav button.on .lb{font-weight:600}
+.nav button .lb small{display:block;font-size:10.5px;color:var(--rail-muted);font-weight:400;margin-top:1px}
+
+
+/* ── 内容 ── */
+.body{padding:26px 28px 70px;max-width:1160px}
+.top{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:26px}
+.top h1{font-size:1.28rem;margin:0;letter-spacing:-.005em}
+.top p{margin:3px 0 0;color:var(--muted);font-size:12.5px}
+.acts{margin-left:auto;display:flex;gap:8px}
+button.run{font:inherit;font-size:12.5px;font-weight:500;padding:7px 15px;cursor:pointer;
+  border-radius:7px;background:var(--accent);color:#fff;border:0;transition:opacity .13s}
+button.run.ghost{background:var(--surface);color:var(--ink-2);border:1px solid var(--line-2)}
+button.run:hover:not(:disabled){opacity:.87}
+button.run:disabled{opacity:.42;cursor:default}
+
+/* 质量中心的两档口径：离线评测与线上质量。做成分段控件而不是左轨两个条目——
+   它们是同一件事的两种量法（有标准答案 / 没有标准答案），并排摆着才好对照；
+   各占一个导航位会让人以为是两块互不相干的业务。 */
+.tabs{display:flex;gap:4px;background:var(--sunken);border:1px solid var(--line);
+  border-radius:10px;padding:4px;margin:-10px 0 24px;width:fit-content;max-width:100%;flex-wrap:wrap}
+.tabs button{font:inherit;cursor:pointer;border:0;background:transparent;color:var(--muted);
+  padding:8px 16px;border-radius:7px;text-align:left;transition:background .13s,color .13s}
+.tabs button:hover{color:var(--ink-2)}
+.tabs button.on{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.05)}
+.tabs button .tt{display:block;font-size:13px;font-weight:600}
+.tabs button.on .tt{color:var(--accent)}
+.tabs button .ts{display:block;font-size:10.5px;color:var(--muted);font-weight:400;margin-top:2px}
+
+/* 口径旁白：指标下面那句"这个数字是怎么来的、样本是谁" */
+.note{font-size:11.5px;color:var(--muted);line-height:1.7;margin:11px 2px 0}
+.note b{color:var(--ink-2)}
+
+/* ── 分节 ── */
+section.blk{margin-bottom:26px}
+.hd{display:flex;align-items:baseline;gap:10px;margin-bottom:11px}
+.hd .n{font-family:var(--mono);font-size:10px;letter-spacing:.15em;text-transform:uppercase;
+  color:var(--muted);font-weight:600}
+.hd .d{font-size:11.5px;color:var(--muted)}
+.hd .line{flex:1;height:1px;background:var(--line)}
+
+/* 质量门禁：结论卡，权重最高 */
+.gate{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  padding:20px 24px;display:grid;grid-template-columns:1fr;gap:20px}
+@media (min-width:760px){.gate{grid-template-columns:auto 1fr;align-items:center;gap:36px}}
+.gate .big{font-family:var(--mono);font-size:2.9rem;line-height:1;font-variant-numeric:tabular-nums;
+  letter-spacing:-.02em;color:var(--ok)}
+.gate .big.bad{color:var(--crit)}
+.gate .big small{font-size:1.1rem;color:var(--muted);margin-left:2px}
+.gate .cap{font-size:12px;color:var(--muted);margin-top:8px}
+.gate .cap b{color:var(--ink-2);font-weight:600}
+.seg{display:flex;gap:3px;margin-bottom:10px}
+.seg i{height:7px;border-radius:2px;background:var(--ok);display:block}
+.seg i.bad{background:var(--crit)}
+.seg i.warn{background:var(--warn)}
+.suites{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.suites span b{font-family:var(--mono);color:var(--ink);font-size:13px;margin-right:3px}
+
+/* 指标网格 */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(196px,1fr));gap:12px}
+.m{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px}
+.m .lb{font-size:12px;color:var(--ink-2);display:flex;align-items:center;gap:6px}
+.m .lb em{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted);font-style:normal;background:var(--surface-2);padding:2px 5px;border-radius:3px}
+.m .v{font-family:var(--mono);font-size:1.55rem;font-variant-numeric:tabular-nums;
+  margin-top:9px;line-height:1.1;letter-spacing:-.01em}
+.m .v small{font-size:.82rem;color:var(--muted)}
+.m .s{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5}
+.m.good .v{color:var(--ok)} .m.warn .v{color:var(--warn)} .m.bad .v{color:var(--crit)}
+.dash{color:var(--muted);font-size:1.1rem}
+
+/* 上下文红线：仪表而非数字 */
+.meters{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.mt{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px}
+.mt .row{display:flex;align-items:baseline;gap:8px;margin-bottom:11px}
+.mt .row .lb{font-size:12.5px;color:var(--ink-2)}
+.mt .row .pc{margin-left:auto;font-family:var(--mono);font-size:1.25rem;font-variant-numeric:tabular-nums}
+.mt .row .pc small{font-size:.75rem;color:var(--muted)}
+.track{position:relative;height:8px;background:var(--sunken);border-radius:4px;overflow:visible}
+.track i{position:absolute;inset:0 auto 0 0;background:var(--accent);border-radius:4px}
+.track i.near{background:var(--warn)}
+.track .lim{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--crit);border-radius:1px}
+.mt .foot{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;
+  color:var(--muted);margin-top:8px}
+.cap-note{font-size:11.5px;color:var(--muted);line-height:1.65;margin-top:12px}
+
+/* 版本管理：指纹由若干要素构成，逐项列出才能看出是哪一项被改过 */
+.fp{display:grid;grid-template-columns:repeat(auto-fit,minmax(142px,1fr));gap:12px 20px}
+.fp div b{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:4px}
+.fp div span{font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+.fp div span.bad{color:var(--crit);font-weight:700}
+.chg{margin:5px 0 0;padding-left:15px;font-size:11.5px;color:var(--ink-2);line-height:1.75}
+.pill.mute{background:var(--surface-2);color:var(--muted)}
+.cap-note b{color:var(--ink-2)}
+
+/* 执行进度 */
+.runbar{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--accent);
+  border-radius:0 var(--r) var(--r) 0;padding:14px 18px;margin-bottom:22px;display:none}
+.runbar.on{display:block}
+.runbar .h{font-size:13px;font-weight:600}
+.runbar .h span{font-family:var(--mono);font-weight:400;color:var(--muted);margin-left:8px;font-size:12px}
+.runbar .cur{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);margin-top:5px;min-height:1.2em}
+.prog{height:4px;background:var(--sunken);border-radius:2px;overflow:hidden;margin-top:10px}
+.prog i{display:block;height:100%;background:var(--accent);width:0;transition:width .25s}
+.rlog{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:10px;
+  max-height:124px;overflow-y:auto;line-height:1.75}
+.rlog b.p{color:var(--ok)} .rlog b.f{color:var(--crit)}
+
+/* 表格 */
+.tw{border:1px solid var(--line);border-radius:var(--r);background:var(--surface);
+  overflow:hidden;margin-bottom:12px}
+table{border-collapse:collapse;width:100%;font-size:12.5px;table-layout:fixed}
+table th,table td{text-align:left;padding:9px 13px;border-bottom:1px solid var(--line);
+  vertical-align:top;white-space:normal;overflow-wrap:anywhere}
+thead th{font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--muted);background:var(--surface-2);font-weight:600}
+tbody tr:last-child td{border-bottom:0}
+tbody tr.row{cursor:pointer;transition:background .1s}
+tbody tr.row:hover{background:var(--surface-2)}
+tbody tr.row.running{background:var(--warn-soft)}
+tbody tr.row.just-pass{background:var(--ok-soft)}
+tbody tr.row.just-fail{background:var(--crit-soft)}
+td.id{font-family:var(--mono);font-weight:600;color:var(--muted)}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right}
+.pill{font-family:var(--mono);font-size:9.5px;font-weight:700;padding:2px 6px;border-radius:3px;
+  letter-spacing:.04em}
+.pill.ok{background:var(--ok-soft);color:var(--ok)}
+.pill.no{background:var(--crit-soft);color:var(--crit)}
+.pill.cut{background:var(--warn-soft);color:var(--warn)}
+.mini{display:inline-block;width:34px;height:4px;border-radius:2px;background:var(--sunken);
+  vertical-align:2px;margin-right:6px;overflow:hidden}
+.mini i{display:block;height:100%;background:var(--accent)}
+.mini i.hot{background:var(--warn)}
+.chip{font-family:var(--mono);font-size:9.5px;padding:2px 6px;border-radius:3px;
+  background:var(--accent-soft);color:var(--accent);margin:0 4px 3px 0;display:inline-block}
+.probe{color:var(--muted);font-size:11.5px;margin-top:3px}
+.why{color:var(--crit);font-size:11.5px;font-family:var(--mono);margin-top:3px}
+
+/* 链路追踪：左列表 + 右详情 */
+.md{display:grid;grid-template-columns:1fr;gap:16px;align-items:start}
+@media (min-width:1080px){.md{grid-template-columns:336px minmax(0,1fr)}}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.panel .ph{padding:16px 18px 13px;border-bottom:1px solid var(--line)}
+.panel .ph .t{font-size:14.5px;font-weight:600;display:flex;align-items:center;gap:8px}
+.panel .ph .t .live{margin-left:auto;font-family:var(--mono);font-size:9px;font-weight:700;
+  letter-spacing:.1em;padding:3px 8px;border-radius:20px;background:var(--ok-soft);color:var(--ok)}
+.panel .ph .d{font-size:11.5px;color:var(--muted);margin-top:3px}
+.filters{padding:12px 14px;border-bottom:1px solid var(--line);display:flex;
+  flex-direction:column;gap:8px;background:var(--surface-2)}
+.filters input,.filters select{font:inherit;font-size:12.5px;padding:8px 11px;width:100%;
+  background:var(--surface);color:var(--ink);border:1px solid var(--line-2);border-radius:7px}
+.filters .two{display:flex;gap:8px}
+.tlist{max-height:620px;overflow-y:auto}
+.ti{display:flex;gap:10px;padding:11px 14px;cursor:pointer;border-bottom:1px solid var(--line);
+  transition:background .1s;align-items:flex-start}
+.ti:last-child{border-bottom:0}
+.ti:hover{background:var(--surface-2)}
+.ti.on{background:var(--accent-soft)}
+.ti .st{width:20px;height:20px;flex:0 0 20px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;font-size:11px;font-weight:700;margin-top:1px}
+.ti .st.SUCCESS{background:var(--ok);color:#fff}
+.ti .st.DEGRADED{background:var(--warn);color:#fff}
+.ti .st.FAILED{background:var(--crit);color:#fff}
+/* 必须 flex：模板字符串里的缩进换行在块级容器中会变成匿名行盒，
+   实测把每个列表项从 55px 撑到 154px。flex 布局忽略纯空白节点。 */
+.ti .tmain{min-width:0;flex:1;display:flex;flex-direction:column;gap:3px}
+.ti .hdr{display:flex;align-items:baseline;gap:8px}
+.ti .q{font-size:12.5px;font-weight:500;line-height:1.5;flex:1;min-width:0;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+/* 元信息必须单行省略：数据源名很长（如「检修作业与安全管理规程」），
+   放开换行会把每个列表项撑成三四行，列表就没法扫了 */
+.ti .meta{font-size:10.5px;color:var(--muted);margin-top:3px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ti .sid{font-family:var(--mono);font-size:10px;color:var(--muted);flex:0 0 auto}
+/* 来源标：线上问答与回归跑测的链路同在一个列表里，不打标就会被当成同一批流量 */
+.src{font-family:var(--mono);font-size:8.5px;font-weight:700;letter-spacing:.06em;padding:1px 5px;
+  border-radius:3px;background:var(--surface-2);color:var(--muted);flex:0 0 auto;white-space:nowrap}
+.src.eval{background:var(--accent-soft);color:var(--accent)}
+.tlist .none{padding:26px;text-align:center;color:var(--muted);font-size:12.5px}
+.tlist .more{padding:11px;text-align:center;color:var(--muted);font-family:var(--mono);
+  font-size:10.5px;letter-spacing:.04em;border-top:1px dashed var(--line);background:var(--surface-2)}
+.tlist .more.done{opacity:.66}
+
+.dt{padding:20px 22px}
+.dt h3{font-size:1.28rem;margin:0;letter-spacing:-.01em;line-height:1.35}
+.dt .ids{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:7px}
+.dt .badges{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}
+.bd{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.05em;
+  padding:4px 10px;border-radius:20px;border:1px solid var(--line-2);color:var(--ink-2)}
+.bd.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.bd.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.bd.crit{background:var(--crit-soft);color:var(--crit);border-color:transparent}
+/* 回答挪到页头下方，默认收起：先看状态与异常，再决定要不要读全文；
+   点开就是全文，不再截断——之前压在页面最底下且有高度上限，长回答被切掉半句 */
+.fold{border-top:1px solid var(--line)}
+.fold>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:9px;
+  padding:12px 22px;font-size:12.5px;color:var(--ink-2);transition:background .12s}
+.fold>summary::-webkit-details-marker{display:none}
+.fold>summary:hover{background:var(--surface-2)}
+.fold>summary b{color:var(--ink);font-weight:600}
+.fold>summary .ar{font-size:9px;color:var(--muted);transition:transform .15s;
+  display:inline-block;width:9px}
+.fold[open]>summary .ar{transform:rotate(90deg)}
+.fold>summary .hint{margin-left:auto;font-family:var(--mono);font-size:10px;letter-spacing:.06em;
+  color:var(--muted)}
+.fold>summary .hint::after{content:'点开读全文'}
+.fold[open]>summary .hint::after{content:'收起'}
+.fold[open]>summary{border-bottom:1px solid var(--line)}
+.fold .in{padding:16px 22px 4px}
+.fold .in .ans{max-height:none}
+.anom{background:var(--warn-soft);border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+  padding:16px 22px;margin:18px 0 0}
+.anom .t{font-size:13px;font-weight:600;color:var(--warn);margin-bottom:9px}
+.anom ul{margin:0;padding-left:16px;font-size:12.5px;color:var(--ink-2);line-height:1.75}
+.anom li{margin-bottom:5px}
+.anom li b{color:var(--ink)}
+.strip{display:flex;flex-wrap:wrap;border-top:1px solid var(--line);
+  background:var(--surface-2);overflow:hidden}
+/* 必须是直接子元素：写成 .strip div 会把格子里的 .v / .x 也当成格子，
+   于是数值和小字各自套一层内边距与分隔线——格子被撑到近两倍高，还多出一堆碎框 */
+.strip>div{flex:1 1 150px;min-width:0;padding:13px 15px;
+  box-shadow:1px 0 0 var(--line),0 1px 0 var(--line)}
+.strip b{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:5px}
+.strip .v{font-family:var(--mono);font-size:1.02rem;font-variant-numeric:tabular-nums;
+  white-space:nowrap}
+.strip .x{font-size:10.5px;color:var(--crit);margin-top:3px}
+.strip .x.mute{color:var(--muted)}
+.dsec{padding:18px 22px 20px}
+
+tr.det td{background:var(--sunken);padding:0}
+.dbox{padding:16px 18px;display:none}
+tr.det.open .dbox{display:block}
+.dbox h4{font-size:9.5px;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;
+  color:var(--muted);margin:0 0 8px;font-weight:600}
+.dbox h4+*{margin-top:0}
+.ans{font-size:12.5px;white-space:pre-wrap;background:var(--surface);border:1px solid var(--line);
+  border-radius:7px;padding:12px 14px;margin-bottom:14px;max-height:240px;overflow-y:auto;color:var(--ink-2)}
+.pipe{display:flex;align-items:stretch;overflow-x:auto;padding:2px 0 12px}
+.pnode{flex:0 0 auto;border:1px solid var(--line);border-radius:8px;padding:9px 13px;
+  min-width:94px;background:var(--surface)}
+.pnode .n{font-size:11.5px;font-weight:600;line-height:1.3}
+.pnode .t{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:3px}
+.k-MODEL,.k-RULE{background:var(--accent-soft);border-color:var(--accent)}
+.k-RAG{background:var(--ok-soft);border-color:var(--ok)}
+.k-GUARD{background:var(--warn-soft);border-color:var(--warn)}
+.pnode.st-ERROR{border-color:var(--crit);background:var(--crit-soft)}
+.pnode.st-DEGRADED{border-color:var(--warn);background:var(--warn-soft)}
+.parrow{flex:0 0 auto;display:flex;align-items:center;padding:0 7px;color:var(--line-2);
+  font-family:var(--mono);font-size:12px}
+table.spans{font-size:11.5px;background:var(--surface)}
+table.spans .spn{font-weight:500;margin-top:4px;line-height:1.4}
+table.spans .spd{font-family:var(--mono);font-size:9.5px;color:var(--muted);margin-top:2px}
+table.spans thead th{background:var(--surface)}
+.tg{font-family:var(--mono);font-size:8.5px;font-weight:700;padding:2px 5px;border-radius:3px;
+  white-space:nowrap;letter-spacing:.04em}
+.tg.MODEL,.tg.RULE{background:var(--accent-soft);color:var(--accent)}
+.tg.TOOL{background:var(--surface-2);color:var(--ink-2)}
+.tg.RAG{background:var(--ok-soft);color:var(--ok)}
+.tg.GUARD{background:var(--warn-soft);color:var(--warn)}
+.sv{font-family:var(--mono);font-size:9.5px;font-weight:700}
+.sv.OK{color:var(--ok)} .sv.ERROR{color:var(--crit)} .sv.DEGRADED{color:var(--warn)}
+.empty{color:var(--muted);font-size:13px;padding:44px 26px;text-align:center;
+  background:var(--surface);border:1px dashed var(--line-2);border-radius:var(--r)}
+.empty a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="shell">
+
+<aside class="rail">
+  <div class="mark">
+    <span class="dot"></span>
+    <span class="t">海上风电维检 Agent<small>管理后台</small></span>
+  </div>
+  <nav class="nav">
+    <button data-v="eval" data-nav="quality" class="on">
+      <svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M2 13V7M6 13V3M10 13V9M14 13V5"/></svg>
+      <span class="lb">Agent 质量中心<small>离线评测 · 线上质量</small></span>
+    </button>
+    <button data-v="traces" data-nav="traces">
+      <svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <circle cx="3.5" cy="8" r="1.6"/><circle cx="12.5" cy="4" r="1.6"/>
+        <circle cx="12.5" cy="12" r="1.6"/><path d="M5 7.2 11 4.6M5 8.8 11 11.4"/></svg>
+      <span class="lb">链路追踪<small>span 明细</small></span>
+    </button>
+    <button data-v="versions" data-nav="versions">
+      <svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+        stroke-linejoin="round"><path d="M8 1.8 1.8 4.9 8 8l6.2-3.1L8 1.8Z"/>
+        <path d="M1.8 8 8 11.1 14.2 8"/><path d="M1.8 11.1 8 14.2l6.2-3.1"/></svg>
+      <span class="lb">版本管理<small>台账与运行指纹</small></span>
+    </button>
+  </nav>
+</aside>
+
+<div class="body">
+  <div class="top">
+    <div>
+      <h1 id="vtitle">Agent 质量中心</h1>
+      <p id="vsub"></p>
+    </div>
+    <span class="acts">
+      <button class="run" id="runAll">运行全部</button>
+      <button class="run ghost" id="runSel">运行选中</button>
+    </span>
+  </div>
+  <div class="tabs" id="qtabs">
+    <button data-t="eval" class="on">
+      <span class="tt">离线评测</span>
+      <span class="ts">固定用例 + 断言 · 判得出对错</span>
+    </button>
+    <button data-t="online">
+      <span class="tt">线上质量</span>
+      <span class="ts">真实问答留下的痕迹 · 没有标准答案</span>
+    </button>
+  </div>
+  <section class="view on" id="v-eval"><p class="empty">加载中…</p></section>
+  <section class="view" id="v-online" style="display:none"><p class="empty">加载中…</p></section>
+  <section class="view" id="v-traces" style="display:none"><p class="empty">加载中…</p></section>
+  <section class="view" id="v-versions" style="display:none"><p class="empty">加载中…</p></section>
+</div>
+
+</div>
+<script>
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const clip = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n) + '…' : s; };
+// 模型有时在一个条目里写字面量 \n 而不是真换行；先还原再转义，否则页面上会出现一串 \n。
+const text = s => esc(String(s ?? '').replace(/\\n/g, '\n')).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+const $ = s => document.querySelector(s);
+// 后台数据是实时的，浏览器会把 GET 响应缓存下来——曾出现「接口已有数据、页面仍显示空」。
+const api = p => fetch(p + (p.includes('?') ? '&' : '?') + '_=' + Date.now(),
+                       {cache: 'no-store'}).then(r => r.json());
+const grade = (v, g, w) => v == null ? '' : (v >= g ? ' good' : v >= w ? ' warn' : ' bad');
+
+const hd = (n, d) => `<div class="hd"><span class="n">${n}</span>${
+  d ? `<span class="d">${esc(d)}</span>` : ''}<span class="line"></span></div>`;
+
+function metric(label, badge, val, unit, sub, cls) {
+  return `<div class="m${cls || ''}">
+    <div class="lb">${label}${badge ? `<em>${badge}</em>` : ''}</div>
+    <div class="v">${val === null || val === undefined
+      ? '<span class="dash">—</span>' : esc(val) + (unit ? `<small>${unit}</small>` : '')}</div>
+    <div class="s">${esc(sub || '')}</div></div>`;
+}
+
+// 数字回答"多少"，仪表回答"离限还有多远"——上下文用量的重点是后者。
+function meter(label, value, limit, foot) {
+  const v = value ?? 0, ratio = Math.min(100, v / limit * 100);
+  return `<div class="mt">
+    <div class="row"><span class="lb">${label}</span>
+      <span class="pc">${v.toFixed(1)}<small>%</small></span></div>
+    <div class="track"><i class="${ratio > 75 ? 'near' : ''}" style="width:${v}%"></i>
+      <span class="lim" style="left:${limit}%"></span></div>
+    <div class="foot"><span>0</span><span>阈值 ${limit}%</span><span>100</span></div>
+    <div class="cap-note">${foot}</div></div>`;
+}
+
+function pipeline(spans) {
+  return '<div class="pipe">' + spans.map((s, i) =>
+    `${i ? '<span class="parrow">→</span>' : ''}<div class="pnode k-${s.kind} st-${s.status}">
+      <div class="n">${esc(s.name)}</div><div class="t">${s.elapsed_ms}ms</div></div>`).join('') + '</div>';
+}
+// 类型并进 Span 列：主从布局下右侧面板只有 ~700px，六列会把摘要挤成竖排。
+function spanTable(spans) {
+  return `<div class="tw"><table class="spans">
+    <colgroup><col style="width:23%"><col style="width:30%"><col style="width:33%">
+      <col style="width:58px"><col style="width:62px"></colgroup>
+    <thead><tr><th>Span</th><th>输入摘要</th><th>输出摘要</th>
+      <th style="text-align:right">耗时</th><th>状态</th></tr></thead>
+    <tbody>${spans.map(s => `<tr>
+      <td><span class="tg ${s.kind}">${s.kind}</span>
+        <div class="spn">${esc(s.name)}</div>
+        ${s.detail ? `<div class="spd">${esc(s.detail)}</div>` : ''}</td>
+      <td>${esc(clip(s.input, 130)) || '—'}</td>
+      <td>${esc(clip(s.output, 170)) || '—'}</td>
+      <td class="num">${s.elapsed_ms}ms</td>
+      <td><span class="sv ${s.status}">${s.status}</span></td></tr>`).join('')}</tbody></table></div>`;
+}
+const miniBar = (v, hot) => v == null ? '—'
+  : `<span class="mini"><i class="${hot ? 'hot' : ''}" style="width:${Math.max(3, Math.min(100, v))}%"></i></span>${v.toFixed(1)}%`;
+
+/* ── 离线评测 ──
+   固定用例 + 断言：有标准答案，所以这一档可以直接判对错，「结果准确率」
+   只在这里出现。线上那一档拿不到标准答案，见 loadOnline。 */
+function evalDetail(it) {
+  const ev = it.evidence || {};
+  const sql = (ev.tables || []).map((t, i) =>
+    `<div class="ans">-- 查询 ${i + 1}，命中 ${t.row_count ?? 0} 行\n${esc(t.sql)}</div>`).join('');
+  return `<div class="dbox">
+    ${it.sources?.length ? `<h4>使用的数据源</h4><div style="margin-bottom:14px">${
+      it.sources.map(s => `<span class="chip">${esc(s)}</span>`).join('')}</div>` : ''}
+    <h4>回答</h4><div class="ans">${text(it.answer) || '（无）'}</div>
+    ${it.unverifiable?.length ? `<h4>现有资料无法确认（${it.unverifiable.length} 项）</h4>
+      <div class="ans">${it.unverifiable.map(u => '· ' + text(u)).join('\n')}</div>` : ''}
+    ${it.spans?.length ? `<h4>Span 明细${it.cost_cny != null
+        ? ` · ${it.model_calls} 次模型调用 · ${it.tokens} tok · ¥${it.cost_cny.toFixed(4)}` : ''}</h4>
+      ${pipeline(it.spans)}${spanTable(it.spans)}` : ''}
+    ${sql ? `<h4>执行过的 SQL</h4>${sql}` : ''}</div>`;
+}
+function suiteTable(items) {
+  return `<div class="tw"><table>
+    <colgroup><col style="width:92px"><col><col style="width:70px"><col style="width:70px">
+      <col style="width:74px"><col style="width:104px"><col style="width:104px"></colgroup>
+    <thead><tr><th>#</th><th>问题</th><th>结果</th><th style="text-align:right">耗时</th>
+      <th style="text-align:right">工具</th><th>数据行用量</th><th>文档用量</th></tr></thead>
+    <tbody>${items.map(it => `
+      <tr class="row" data-id="${esc(it.id)}">
+        <td class="id"><input type="checkbox" class="pick" value="${esc(it.id)}"
+          onclick="event.stopPropagation()" style="margin-right:6px;vertical-align:-1px">${esc(it.id)}</td>
+        <td>${esc(clip(it.question, 52))}
+          ${it.probe ? `<div class="probe">${esc(it.probe)}</div>` : ''}
+          ${it.problems?.length ? `<div class="why">${esc(it.problems.join('；'))}</div>` : ''}</td>
+        <td><span class="pill ${it.ok ? 'ok' : 'no'}">${it.ok ? 'PASS' : 'FAIL'}</span></td>
+        <td class="num">${it.elapsed_ms ? (it.elapsed_ms / 1000).toFixed(1) + 's' : '—'}</td>
+        <td class="num">${it.steps ?? '—'}</td>
+        <td class="num">${miniBar(it.db_rows_pct, (it.db_rows_pct ?? 0) > 40)}</td>
+        <td class="num">${miniBar(it.doc_chars_pct, (it.doc_chars_pct ?? 0) > 55)}</td>
+      </tr>
+      <tr class="det"><td colspan="7">${evalDetail(it)}</td></tr>`).join('')}
+    </tbody></table></div>`;
+}
+async function loadEval() {
+  const d = await api('/api/eval'), box = $('#v-eval');
+  if (!d.items.length) {
+    box.innerHTML = '<p class="empty">尚无结果。点击右上角「运行全部」即可现场执行。</p>'; return;
+  }
+  const M = d.metrics || {}, m = k => M[k] || {}, t = d.totals;
+  const allPass = t.passed === t.total;
+
+  box.innerHTML = `
+    <section class="blk">${hd('质量门禁', '断言全部命中才算通过 · 离线口径')}
+      <div class="gate">
+        <div>
+          <div class="big${allPass ? '' : ' bad'}">${m('result_accuracy').value ?? '—'}<small>%</small></div>
+          <div class="cap">结果准确率 · <b>${t.passed} / ${t.total}</b> 条通过</div>
+        </div>
+        <div>
+          <div class="seg">${d.summary.map(s => Array.from({length: s.total}, (_, i) =>
+            `<i class="${i < s.passed ? '' : 'bad'}" style="flex:1"></i>`).join('')).join('')}</div>
+          <div class="suites">${d.summary.map(s =>
+            `<span><b>${s.passed}/${s.total}</b>${esc(s.label)}</span>`).join('')}</div>
+        </div>
+      </div></section>
+
+    <section class="blk">${hd('执行健康', '过程是否按预期收口')}
+      <div class="grid">
+        ${metric('任务完成率', 'NON-EMPTY', m('task_completion').value, '%',
+                 m('task_completion').note, grade(m('task_completion').value, 95, 80))}
+        ${metric('工具调用成功率', 'BY CALL', m('tool_success').value, '%',
+                 m('tool_success').note, grade(m('tool_success').value, 95, 85))}
+        ${metric('链路完成率', 'NO CUTOFF', m('chain_completion').value, '%',
+                 m('chain_completion').note, grade(m('chain_completion').value, 95, 85))}
+      </div></section>
+
+    <section class="blk">${hd('代价', '延迟与成本')}
+      <div class="grid">
+        ${metric('P95 端到端耗时', 'LATENCY', m('p95_latency_ms').value == null ? null
+                 : (m('p95_latency_ms').value / 1000).toFixed(1), 's', m('p95_latency_ms').note)}
+        ${metric('平均 Token 消耗', 'PER TASK', m('avg_tokens').value, '', m('avg_tokens').note)}
+        ${metric('单任务成本', 'CNY', m('cost_per_task').value == null ? null
+                 : '¥' + m('cost_per_task').value.toFixed(4), '', m('cost_per_task').note)}
+      </div></section>
+
+    <section class="blk">${hd('上下文红线', '进入模型上下文的语料占比 · 峰值')}
+      <div class="meters">
+        ${meter('数据行', t.peak_db_rows_pct, 50,
+          '题面要求不得将整个数据库放入上下文。系统在每次工具调用前预检，累计超阈值即拒绝并要求收窄查询。')}
+        ${meter('文档字符', t.peak_doc_chars_pct, 70,
+          '文档侧阈值放宽到 <b>70%</b>：一个复杂合规问题天然需要 5~8 个条款加一节手册，定在 50% 会误伤正常取证。')}
+      </div></section>
+
+    <section class="blk">${hd('用例', '点击任意一行展开完整执行链路')}
+      <p class="note">样本 = <b>eval/ 下的固定用例</b>（回归 / 探针 / 施压三组），
+        与线上流量无关；这批链路在追踪页标为 <b>回归</b>，不进线上质量的分母。</p>
+      ${d.summary.map(s => `<div class="hd" style="margin-top:16px"><span class="d"
+        style="font-weight:600;color:var(--ink-2)">${esc(s.label)}</span><span class="line"></span></div>` +
+        suiteTable(d.items.filter(i => i.suite === s.suite))).join('')}
+    </section>`;
+  box.querySelectorAll('tr.row').forEach(tr => tr.onclick = () =>
+    tr.nextElementSibling?.classList.toggle('open'));
+}
+
+/* ── 线上质量 ──
+   与离线评测最大的不同：这里没有断言，判不了对错。所以整页不出现任何
+   「准确率」，出现的全是系统自己留下的痕迹——有没有正常收口、有没有因为
+   没取到证据而拒答、有没有把「现有资料无法确认」标出来、上下文压到了哪、
+   一次问答花了多少。把它和离线那档并成一张表，等于用有标准答案的口径
+   去解释没有标准答案的数据。 */
+function onlineRow(t) {
+  const srcs = (t.sources || []).map(x => x.replace(/（.*?）/, '')).join('、');
+  const cls = t.status === 'SUCCESS' ? 'ok' : t.status === 'FAILED' ? 'no' : 'cut';
+  const cost = t.summary?.cost_cny;
+  return `<tr class="row" data-id="${t.id}">
+    <td class="id">${esc(t.at || '')}</td>
+    <td>${esc(clip(t.question, 54))}${t.notes?.length
+      ? `<div class="probe">${esc(clip(t.notes.map(n => n.kind).join('、'), 44))}</div>` : ''}</td>
+    <td><span class="pill ${cls}">${esc(t.status)}</span></td>
+    <td class="num">${t.elapsed_ms ? (t.elapsed_ms / 1000).toFixed(1) + 's' : '—'}</td>
+    <td class="num">${t.steps ?? '—'}</td>
+    <td class="num">${t.unverifiable_count ? t.unverifiable_count + ' 项' : '—'}</td>
+    <td class="num">${cost != null ? '¥' + cost.toFixed(4) : '—'}</td>
+    <td>${esc(clip(srcs, 20)) || '—'}</td></tr>`;
+}
+
+async function loadOnline() {
+  const d = await api('/api/quality/online'), box = $('#v-online'), s = d.stats || {};
+  if (!s.count) {
+    box.innerHTML = `<p class="empty">还没有线上问答记录。<br><br>到
+      <a href="/">问答页</a>提一个问题，这里就会出现真实流量的质量指标。<br>
+      后台点「运行全部」跑的是回归用例，<b>不算</b>线上流量，不会出现在这一档里。</p>`;
+    return;
+  }
+  const items = d.items || [];
+  // 降级 = 给出了回答但没走主路径；失败 = 压根没有回答。两者分开数，
+  // 合成一个"异常数"会把「护栏起作用了」和「服务挂了」说成同一件事。
+  const degraded = (s.degraded_traces || 0) - (s.failed_traces || 0);
+
+  box.innerHTML = `
+    <section class="blk">${hd('服务达成', '线上没有标准答案 —— 这里看的是收口，不是对错')}
+      <div class="gate">
+        <div>
+          <div class="big${(s.success_rate ?? 0) >= 90 ? '' : ' bad'}">${
+            s.success_rate ?? '—'}<small>%</small></div>
+          <div class="cap">正常收口 · <b>${s.success} / ${s.count}</b> 次问答</div>
+        </div>
+        <div>
+          <div class="seg">${items.slice().reverse().map(t =>
+            `<i class="${t.status === 'SUCCESS' ? '' : t.status === 'FAILED' ? 'bad' : 'warn'}"
+              style="flex:1" title="${esc(t.at || '')}　${esc(t.status)}"></i>`).join('')}</div>
+          <div class="suites">
+            <span><b>${s.success}</b>正常</span>
+            <span><b>${degraded}</b>降级</span>
+            <span><b>${s.failed_traces || 0}</b>失败</span>
+            <span><b>${s.refused || 0}</b>未取证拒答</span>
+          </div>
+        </div>
+      </div>
+      <p class="note">样本 = 进程内留存的最近 <b>${s.count} / ${s.capacity}</b> 次真实问答（${
+        esc(s.earliest_at || '')} → ${esc(s.latest_at || '')}），<b>重启即清空</b>；
+        后台跑的回归用例不计入本档。左起为最早一次，逐格向右为最新。</p>
+    </section>
+
+    <section class="blk">${hd('回答可用性', '答了什么 · 拒了什么 · 标了什么')}
+      <div class="grid">
+        ${metric('有效回答率', 'NON-EMPTY', s.answer_rate, '%',
+                 `${s.answered} / ${s.count} 次产出非空回答`, grade(s.answer_rate, 95, 80))}
+        ${metric('未取证拒答率', 'REFUSED', s.refused_rate, '%',
+                 `${s.refused} 次未调用任何工具，宁可不答 —— 护栏生效，不是故障`)}
+        ${metric('标注存疑占比', 'FLAGGED', s.flagged_rate, '%',
+                 `${s.flagged_traces} 次回答带「现有资料无法确认」`)}
+      </div>
+      <p class="note">线上拿不到标准答案，判不出"答得对不对"。这三项是能确认的部分：
+        <b>答没答</b>、<b>该不答时有没有停住</b>、<b>没把握时有没有标出来</b>。
+        要判对错请到「离线评测」，那里有断言。</p>
+    </section>
+
+    <section class="blk">${hd('执行健康', '过程是否按预期收口')}
+      <div class="grid">
+        ${metric('工具调用成功率', 'BY CALL', s.tool_success_rate, '%',
+                 `${s.tool_calls} 次调用 · ${s.tool_failures} 次失败`,
+                 grade(s.tool_success_rate, 95, 85))}
+        ${metric('模型调用成功率', 'BY CALL', s.model_success_rate, '%',
+                 `${s.model_calls} 次调用 · ${s.model_failures} 次失败`,
+                 grade(s.model_success_rate, 95, 85))}
+        ${metric('链路完成率', 'NO CUTOFF', s.chain_completion_rate, '%',
+                 s.max_steps_hit ? `${s.max_steps_hit} 次撞到步数上限` : '全部正常收口',
+                 grade(s.chain_completion_rate, 95, 85))}
+      </div></section>
+
+    <section class="blk">${hd('代价', '延迟与成本 · 真实流量口径')}
+      <div class="grid">
+        ${metric('P95 端到端耗时', 'LATENCY', s.p95_ms == null ? null
+                 : (s.p95_ms / 1000).toFixed(1), 's', s.p50_ms == null ? ''
+                 : `P50 ${(s.p50_ms / 1000).toFixed(1)}s · 样本 ${s.count}`)}
+        ${metric('平均 Token 消耗', 'PER TASK', s.avg_tokens, '',
+                 `${s.model_calls} 次模型调用`)}
+        ${metric('单次问答成本', 'CNY', s.avg_cost == null ? null
+                 : '¥' + s.avg_cost.toFixed(4), '', `累计 ¥${(s.total_cost || 0).toFixed(4)}`)}
+      </div></section>
+
+    <section class="blk">${hd('上下文红线', '真实提问把语料压到了哪 · 峰值')}
+      <div class="meters">
+        ${meter('数据行', s.peak_db_rows_pct, 50,
+          '线上峰值。每次工具调用前预检，累计超阈值即拒绝并要求收窄查询 —— 真实提问比用例发散，这条水位是看护栏有没有被逼到线上的地方。')}
+        ${meter('文档字符', s.peak_doc_chars_pct, 70,
+          '线上峰值。文档侧阈值放宽到 <b>70%</b>：一个复杂合规问题天然需要 5~8 个条款加一节手册。')}
+      </div></section>
+
+    <section class="blk">${hd('最近问答', '点击任意一行到链路追踪逐段复核')}
+      <div class="tw"><table>
+        <colgroup><col style="width:104px"><col><col style="width:92px"><col style="width:72px">
+          <col style="width:58px"><col style="width:66px"><col style="width:84px">
+          <col style="width:118px"></colgroup>
+        <thead><tr><th>时间</th><th>问题</th><th>状态</th><th style="text-align:right">耗时</th>
+          <th style="text-align:right">步数</th><th style="text-align:right">存疑</th>
+          <th style="text-align:right">成本</th><th>数据源</th></tr></thead>
+        <tbody>${items.map(onlineRow).join('')}</tbody></table></div>
+    </section>`;
+
+  box.querySelectorAll('tr.row').forEach(tr => tr.onclick = () => {
+    // 带着这一条跳过去，落在追踪页最近一条上等于点了个碰运气的按钮
+    FOCUS = Number(tr.dataset.id);
+    show('traces');
+  });
+}
+
+/* ── 链路追踪 ── */
+async function openTrace(id, cell) {
+  if (cell.dataset.loaded) { cell.parentElement.classList.toggle('open'); return; }
+  const d = await api('/api/traces/' + id);
+  cell.dataset.loaded = '1';
+  if (d.error) cell.innerHTML = `<div class="dbox">${esc(d.error)}</div>`;
+  else {
+    const b = d.budget || {}, s = d.summary || {};
+    cell.innerHTML = `<div class="dbox">
+      <h4>回答</h4><div class="ans">${text(clip(d.answer, 900)) || '（无）'}</div>
+      ${d.unverifiable?.length ? `<h4>现有资料无法确认（${d.unverifiable.length} 项）</h4>
+        <div class="ans">${d.unverifiable.map(u => '· ' + text(u)).join('\n')}</div>` : ''}
+      <h4>执行链路 · ${s.model_calls || 0} 次模型调用 · ${(s.prompt_tokens || 0) + (s.completion_tokens || 0)} tok
+        · ¥${(s.cost_cny || 0).toFixed(4)} · 上下文 ${(b.db_rows_pct ?? 0).toFixed(1)}% 行 /
+        ${(b.doc_chars_pct ?? 0).toFixed(1)}% 文档</h4>
+      ${pipeline(d.spans || [])}${spanTable(d.spans || [])}</div>`;
+  }
+  cell.parentElement.classList.add('open');
+}
+let TRACES = [], CURRENT = null;
+// 从「线上质量」的最近问答表点过来时要定位的那一条；用完即清
+let FOCUS = null;
+
+/* 滚动分页：先渲染 10 条，滚到底再续 10 条。
+   留存上限只有 50 条，一次全渲染也撑得住——但列表是用来**扫**的：
+   一屏铺 50 条会把筛选框和最近几条挤出视野，找一条链路反而更慢。
+   页大小与留存上限解耦，MAX_TRACES 改大了这里不用跟着改。 */
+const PAGE = 10;
+let SHOWN = PAGE;
+
+const SRC_LABEL = {online: '线上', eval: '回归'};
+
+function traceRow(t) {
+  const srcs = (t.sources || []).map(x => x.replace(/（.*?）/, '')).join('、');
+  const src = t.source === 'eval' ? 'eval' : 'online';
+  return `<div class="ti${CURRENT === t.id ? ' on' : ''}" data-id="${t.id}">
+    <span class="st ${t.status}">${
+      t.status === 'SUCCESS' ? '✓' : t.status === 'FAILED' ? '✕' : '!'}</span>
+    <span class="tmain">
+      <span class="hdr"><span class="q">${esc(t.question)}</span>
+        <span class="src ${src}">${SRC_LABEL[src]}</span>
+        <span class="sid">${esc((t.short_id || '').slice(0, 6))}</span></span>
+      <span class="meta" title="${esc(srcs)}">${esc(t.at || '')} · ${
+        ((t.elapsed_ms || 0) / 1000).toFixed(2)}s · ${esc(srcs || '—')}</span>
+    </span></div>`;
+}
+
+function renderList() {
+  const kw = ($('#tq')?.value || '').trim().toLowerCase();
+  const st = $('#tst')?.value || '';
+  const sc = $('#tsrc')?.value || '';
+  // 来源：线上问答与回归跑测的链路同在这一个列表里，要能只看其中一批
+  const og = $('#torg')?.value || '';
+  const hit = TRACES.filter(t =>
+    (!kw || t.question.toLowerCase().includes(kw) || (t.short_id || '').includes(kw)) &&
+    (!st || t.status === st) &&
+    (!og || (t.source || 'online') === og) &&
+    (!sc || (t.sources || []).some(x => x.includes(sc))));
+  // 选中的那一条必须落在窗口里。从线上质量跳过来的可能排在第 30 条，
+  // 渲染不到它就会变成：右边详情已经换了，左边一行高亮都没有。
+  const at = hit.findIndex(t => t.id === CURRENT);
+  if (at >= SHOWN) SHOWN = Math.ceil((at + 1) / PAGE) * PAGE;
+
+  const page = hit.slice(0, SHOWN), rest = hit.length - page.length;
+  const foot = rest ? `<div class="more">下滑续读 · 已显示 ${page.length} / ${hit.length}</div>`
+             : hit.length > PAGE ? `<div class="more done">已显示全部 ${hit.length} 条</div>` : '';
+  $('#tlist').innerHTML = hit.length ? page.map(traceRow).join('') + foot
+    : '<div class="none">没有匹配的执行记录</div>';
+  $('#tlist').querySelectorAll('.ti').forEach(el =>
+    el.onclick = () => selectTrace(Number(el.dataset.id)));
+}
+
+/** 改筛选条件即回到第一页。不复位的话，筛完只剩 3 条时窗口还停在 30，
+ *  下次清空筛选又会一口气铺出 30 条——分页等于没做。 */
+function resetList() {
+  SHOWN = PAGE;
+  renderList();
+  const list = $('#tlist');
+  if (list) list.scrollTop = 0;
+}
+
+async function selectTrace(id) {
+  CURRENT = id;
+  renderList();
+  // 已经在视野里就不动（block:'nearest'）；跳过来的那条在窗口深处时才滚
+  $(`#tlist .ti[data-id="${id}"]`)?.scrollIntoView({block: 'nearest'});
+  const box = $('#tdetail');
+  box.innerHTML = '<div class="dt"><p style="color:var(--muted);font-size:13px">加载中…</p></div>';
+  const d = await api('/api/traces/' + id);
+  if (d.error) { box.innerHTML = `<div class="dt"><p>${esc(d.error)}</p></div>`; return; }
+  const s = d.summary || {}, b = d.budget || {};
+  const steps = (d.spans || []).filter(x => ['TOOL', 'RAG', 'RULE'].includes(x.kind)).length;
+  const badges = [
+    `<span class="bd ${d.status === 'SUCCESS' ? 'ok' : d.status === 'FAILED' ? 'crit' : 'warn'}">${
+      d.status}</span>`,
+    s.model_failures ? `<span class="bd crit">MODEL FAIL ×${s.model_failures}</span>` : '',
+    `<span class="bd">${steps > 1 ? 'MULTI-STEP' : 'SINGLE-STEP'} ×${steps}</span>`,
+    s.tool_failures ? `<span class="bd crit">TOOL FAIL ×${s.tool_failures}</span>` : '',
+    d.unverifiable?.length ? `<span class="bd warn">无法确认 ${d.unverifiable.length} 项</span>` : '',
+  ].filter(Boolean).join('');
+
+  box.innerHTML = `
+    <div class="dt">
+      <h3>${esc(d.question)}</h3>
+      <div class="ids">${esc(d.short_id || '')} · ${
+        SRC_LABEL[d.source === 'eval' ? 'eval' : 'online']} · ${esc(d.model || '')} · ${esc(d.at || '')}
+        · 上下文 ${(b.db_rows_pct ?? 0).toFixed(1)}% 行 / ${(b.doc_chars_pct ?? 0).toFixed(1)}% 文档</div>
+      <div class="badges">${badges}</div>
+    </div>
+    ${(d.answer || d.unverifiable?.length) ? `<details class="fold">
+      <summary><span class="ar">▶</span><b>回答</b>${
+        d.unverifiable?.length ? ` · 含无法确认 ${d.unverifiable.length} 项` : ''}
+        <span class="hint"></span></summary>
+      <div class="in">
+        <div class="ans">${text(d.answer) || '（无）'}</div>
+        ${d.unverifiable?.length ? `<h4 style="font-size:9.5px;font-family:var(--mono);
+          letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 10px;
+          font-weight:600">现有资料无法确认（${d.unverifiable.length} 项）</h4>
+          <div class="ans">${d.unverifiable.map(u => '· ' + text(u)).join('\n')}</div>` : ''}
+      </div></details>` : ''}
+    ${d.notes?.length ? `<div class="anom">
+      <div class="t">${d.status === 'FAILED' ? '本次链路中断，未产出回答' : '本次链路未按主路径完成'}</div>
+      <ul>${d.notes.map(n => `<li><b>${esc(n.kind)}</b>：${esc(clip(n.text, 240))}</li>`).join('')}</ul>
+    </div>` : ''}
+    <div class="strip">
+      <div><b>总耗时</b><div class="v">${(d.elapsed_ms / 1000).toFixed(2)}s</div>
+        <div class="x mute">${s.span_count || 0} span</div></div>
+      <div><b>模型调用</b><div class="v">${s.model_calls || 0}</div>
+        <div class="x${s.model_failures ? '' : ' mute'}">${
+          s.model_failures ? s.model_failures + ' 失败' : '全部成功'}</div></div>
+      <div><b>Token</b><div class="v">${(s.prompt_tokens || 0) + (s.completion_tokens || 0)}</div>
+        <div class="x mute">缓存命中 ${s.cached_tokens || 0}</div></div>
+      <div><b>工具调用</b><div class="v">${s.tool_calls || 0}</div>
+        <div class="x${s.tool_failures ? '' : ' mute'}">${
+          s.tool_failures ? s.tool_failures + ' 失败' : '全部成功'}</div></div>
+      <div><b>成本</b><div class="v">¥${(s.cost_cny || 0).toFixed(4)}</div>
+        <div class="x mute">按官方单价</div></div>
+    </div>
+    <div class="dsec">
+      <h4 style="font-size:9.5px;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;
+        color:var(--muted);margin:0 0 10px;font-weight:600">执行流水线</h4>
+      ${pipeline(d.spans || [])}
+      <h4 style="font-size:9.5px;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;
+        color:var(--muted);margin:14px 0 10px;font-weight:600">Span 明细</h4>
+      ${spanTable(d.spans || [])}
+    </div>`;
+}
+
+async function loadTraces() {
+  const d = await api('/api/traces'), box = $('#v-traces'), s = d.stats || {};
+  if (!s.count) {
+    box.innerHTML = `<p class="empty">进程内暂无链路记录。<br><br>到
+      <a href="/">问答页</a>提一个问题，或在「Agent 质量中心 · 离线评测」里点运行，这里就会出现完整的 span 明细。</p>`;
+    return;
+  }
+  TRACES = d.items;
+  const srcs = [...new Set(d.items.flatMap(t => (t.sources || [])
+    .map(x => x.replace(/（.*?）/, ''))))];
+
+  box.innerHTML = `
+    <section class="blk">${hd('链路健康', `进程内留存 ${s.count} / ${s.capacity} 条 · 线上与回归合计 · 重启即清空`)}
+      <div class="grid">
+        ${metric('P95 总耗时', 'LATENCY', s.p95_ms == null ? null : (s.p95_ms / 1000).toFixed(2), 's',
+                 s.p50_ms == null ? '' : `P50 ${(s.p50_ms / 1000).toFixed(2)}s · 样本 ${s.count}`)}
+        ${metric('模型调用成功率', 'BY CALL', s.model_success_rate, '%',
+                 `${s.model_calls} 次调用 · ${s.model_failures || 0} 次失败${
+                   s.failed_traces ? ` · ${s.failed_traces} 条链路中断` : ''}`,
+                 grade(s.model_success_rate, 99, 95))}
+        ${metric('工具调用成功率', 'BY CALL', s.tool_success_rate, '%',
+                 `${s.tool_calls} 次调用 · ${s.tool_failures} 次失败`, grade(s.tool_success_rate, 95, 85))}
+        ${metric('链路完成率', 'NO CUTOFF', s.chain_completion_rate, '%',
+                 s.degraded_traces ? `${s.degraded_traces} 条未走主路径` : '全部正常收口',
+                 grade(s.chain_completion_rate, 95, 85))}
+        ${metric('平均 Token', 'PER TASK', s.avg_tokens, '', `${s.count} 条链路均值`)}
+        ${metric('单次成本', 'CNY', s.avg_cost == null ? null : '¥' + s.avg_cost.toFixed(4), '',
+                 `累计 ¥${(s.total_cost || 0).toFixed(4)}`)}
+      </div></section>
+
+    <div class="md">
+      <div class="panel">
+        <div class="ph"><div class="t">最近执行<span class="live">LIVE</span></div>
+          <div class="d">点击查看节点级 Span</div></div>
+        <div class="filters">
+          <input id="tq" placeholder="搜索问题或 Trace ID…">
+          <div class="two">
+            <select id="tst"><option value="">全部状态</option>
+              <option value="SUCCESS">SUCCESS</option><option value="DEGRADED">DEGRADED</option>
+              <option value="FAILED">FAILED</option></select>
+            <select id="tsrc"><option value="">全部数据源</option>${
+              srcs.map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join('')}</select>
+          </div>
+          <select id="torg"><option value="">线上 + 回归</option>
+            <option value="online">只看线上问答</option>
+            <option value="eval">只看回归跑测</option></select>
+        </div>
+        <div class="tlist" id="tlist"></div>
+      </div>
+      <div class="panel" id="tdetail"></div>
+    </div>`;
+
+  ['#tq', '#tst', '#tsrc', '#torg'].forEach(sel => {
+    const el = $(sel);
+    el.oninput = resetList; el.onchange = resetList;
+  });
+
+  // 滚到距底 48px 以内就续下一页。阈值不设 0：等滚到贴底才加载，
+  // 惯性滚动会先撞一下底再弹回来，看着像卡住了。
+  const list = $('#tlist');
+  list.onscroll = () => {
+    if (SHOWN >= TRACES.length) return;
+    if (list.scrollTop + list.clientHeight >= list.scrollHeight - 48) {
+      SHOWN += PAGE;
+      renderList();
+    }
+  };
+
+  SHOWN = PAGE;
+  renderList();
+  // 从线上质量带过来的那一条优先；它可能已被新记录挤出留存，回退到最近一条
+  const focus = FOCUS && TRACES.some(t => t.id === FOCUS) ? FOCUS : d.items[0].id;
+  FOCUS = null;
+  selectTrace(focus);
+}
+
+/* ── 版本管理 ── */
+// 七要素里布尔与比例不能直接印出来：true/0.5 看不出是什么
+const fpval = (k, v) => k === 'thinking' ? (v ? 'on' : 'off')
+  : (k === 'row_ratio' || k === 'doc_ratio') ? (v * 100).toFixed(0) + '%' : String(v);
+
+async function loadVersions() {
+  const d = await api('/api/versions'), box = $('#v-versions');
+  const f = d.fields || {}, cfg = d.config || {}, drift = d.drift || [];
+  const bad = k => drift.some(x => x.key === k);
+
+  box.innerHTML = `
+    <section class="blk">${hd('当前运行', `指纹由影响行为的 ${Object.keys(f).length} 项要素算出`)}
+      <div class="gate">
+        <div>
+          <div class="big${drift.length ? ' bad' : ''}">${esc(d.current)}</div>
+          <div class="cap">${drift.length
+            ? `与台账声明<b>不一致</b> · ${drift.length} 项被改过`
+            : '与台账声明<b>一致</b>'}<br>运行指纹 <b>${esc(d.fingerprint)}</b>　台账声明 <b>${
+              esc(d.declared_fingerprint || '—')}</b></div>
+        </div>
+        <div class="fp">${Object.keys(f).map(k =>
+          `<div><b>${esc(f[k])}</b><span class="${bad(k) ? 'bad' : ''}">${
+            esc(fpval(k, cfg[k]))}</span></div>`).join('')}</div>
+      </div>
+      ${drift.length ? `<div class="anom" style="margin:0;border-radius:0 0 var(--r) var(--r)">
+        <div class="t">实际跑的与台账登记的不是同一套配置</div>
+        <ul>${drift.map(x => `<li><b>${esc(x.label)}</b>：台账声明 ${
+          esc(fpval(x.key, x.declared))}，实际生效 ${esc(fpval(x.key, x.actual))}</li>`).join('')}</ul>
+      </div>` : ''}
+      <div class="cap-note">工具集 ${(d.tools || []).map(t => `<span class="chip">${esc(t)}</span>`).join('')}
+        <br>配置的真相是环境变量与代码，这一页只负责如实呈现与核对，不从后台改运行时。</div>
+    </section>
+
+    <section class="blk">${hd('版本台账', '登记在 agent/versions.py · 动了八要素就加一条并改 CURRENT')}
+      <div class="tw"><table>
+        <colgroup><col style="width:76px"><col style="width:102px"><col style="width:82px">
+          <col><col style="width:84px"></colgroup>
+        <thead><tr><th>版本</th><th>日期</th><th>状态</th><th>变更点</th><th>指纹</th></tr></thead>
+        <tbody>${(d.ledger || []).map(e => `<tr>
+          <td class="id">${esc(e.version)}</td>
+          <td style="white-space:nowrap">${esc(e.date)}</td>
+          <td><span class="pill ${e.running ? 'ok' : 'mute'}">${e.running ? '运行中' : '历史'}</span></td>
+          <td><b>${esc(e.summary)}</b>
+            <ul class="chg">${(e.changes || []).map(c => `<li>${esc(c)}</li>`).join('')}</ul></td>
+          <td class="num">${esc(e.fingerprint)}</td></tr>`).join('')}</tbody></table></div>
+      <div class="cap-note">指纹只覆盖会改变回答的要素，<b>不含数据与文档内容</b>——换了语料指纹不动，
+        那属于语料版本，不是 agent 版本。同指纹的两个版本（如 V1.1 与 V1.0）差异只在可观测性一侧，
+        决策行为没有变化。</div>
+    </section>`;
+}
+
+/* ── 视图切换 ──
+   三个视图、两个左轨条目：质量中心的两档（离线评测 / 线上质量）共用一个
+   导航位，用分段控件切换。nav 字段决定左轨哪一条高亮，tab 字段决定分段
+   控件选中哪一格；tab 为空即不是质量中心，分段控件整个收起。
+   hash 仍是每个视图各一个（#eval / #online / #traces），刷新与收藏都落回原处。 */
+const VIEW = {
+  eval:   {t: 'Agent 质量中心', nav: 'quality', tab: 'eval',   load: loadEval,
+           s: '离线评测 · 固定用例与断言判出来的对错，数据来自 eval/run.py 的落盘产物'},
+  online: {t: 'Agent 质量中心', nav: 'quality', tab: 'online', load: loadOnline,
+           s: '线上质量 · 用户在问答页真实问出来的那些，没有标准答案，只看系统留下的痕迹'},
+  traces: {t: '链路追踪', nav: 'traces', tab: '', load: loadTraces,
+           s: '逐段复核 agent 的执行过程，线上与回归的链路都在这里，进程内留存'},
+  versions: {t: 'Agent 版本管理', nav: 'versions', tab: '', load: loadVersions,
+           s: '版本台账是声明，运行指纹是现算的 —— 用来确认此刻跑的到底是不是登记的那一版'},
+};
+// 左轨点回质量中心时停在上一次看的那一档——切到追踪页再切回来被打回离线档，
+// 等于把人正在看的东西换掉了
+let QTAB = 'eval';
+
+function show(name) {
+  if (!VIEW[name]) name = 'eval';
+  const v = VIEW[name];
+  if (v.tab) QTAB = name;
+  document.querySelectorAll('.nav button').forEach(b =>
+    b.classList.toggle('on', b.dataset.nav === v.nav));
+  Object.keys(VIEW).forEach(k =>
+    $('#v-' + k).style.display = k === name ? '' : 'none');
+  $('#qtabs').style.display = v.tab ? '' : 'none';
+  document.querySelectorAll('#qtabs button').forEach(b =>
+    b.classList.toggle('on', b.dataset.t === v.tab));
+  $('#vtitle').textContent = v.t;
+  $('#vsub').textContent = v.s;
+  // 执行按钮只属于离线评测：跑的是 eval/ 下的固定用例，与线上流量无关
+  ['#runAll', '#runSel'].forEach(sel => $(sel).style.display = name === 'eval' ? '' : 'none');
+  if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+  v.load();
+}
+document.querySelectorAll('.nav button').forEach(b =>
+  b.onclick = () => show(b.dataset.nav === 'quality' ? QTAB : b.dataset.v));
+document.querySelectorAll('#qtabs button').forEach(b => b.onclick = () => show(b.dataset.t));
+// 直接改地址栏里的 hash（或按浏览器后退）也要换页——三个视图各有一个 hash，
+// 只在首次加载时读一次的话，贴给别人的 #online 链接在已开着的页面上点不动
+window.addEventListener('hashchange', () => {
+  const next = location.hash.slice(1);
+  if (VIEW[next]) show(next);
+});
+
+/* ── 现场执行 ── */
+// 与命令行 eval/run.py 走同一套判定（eval/verdict.py），结果同样落盘。
+function wireRun() {
+  const bar = document.createElement('div');
+  bar.className = 'runbar'; bar.id = 'runbar';
+  bar.innerHTML = `<div class="h"><span id="rtitle">正在执行</span><span id="rcount"></span></div>
+    <div class="cur" id="rcur"></div><div class="prog"><i id="rbar"></i></div>
+    <div class="rlog" id="rlog"></div>`;
+  $('.body').insertBefore(bar, $('#v-eval'));
+
+  const run = async ids => {
+    const btns = document.querySelectorAll('button.run');
+    btns.forEach(b => b.disabled = true);
+    show('eval'); bar.classList.add('on');
+    $('#rlog').innerHTML = ''; $('#rbar').style.width = '0'; $('#rtitle').textContent = '正在执行';
+    let total = 0, done = 0, passed = 0;
+    try {
+      const r = await fetch('/api/eval/run', {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ids})});
+      const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
+      for (;;) {
+        const {value, done: fin} = await reader.read();
+        if (fin) break;
+        buf += dec.decode(value, {stream: true});
+        const parts = buf.split('\n\n'); buf = parts.pop();
+        for (const p of parts) {
+          const line = p.split('\n').find(l => l.startsWith('data:'));
+          if (!line) continue;
+          const ev = JSON.parse(line.slice(5).trim());
+          if (ev.type === 'begin') { total = ev.total; $('#rcount').textContent = `0 / ${total}`; }
+          else if (ev.type === 'running') {
+            $('#rcur').textContent = `${ev.id}　${ev.question.slice(0, 56)}`;
+            const row = document.querySelector(`#v-eval tr.row[data-id="${ev.id}"]`);
+            if (row) { row.classList.add('running'); row.scrollIntoView({block: 'center', behavior: 'smooth'}); }
+          } else if (ev.type === 'case') {
+            done++; if (ev.ok) passed++;
+            $('#rcount').textContent = `${done} / ${total}　通过 ${passed}`;
+            $('#rbar').style.width = (done / total * 100) + '%';
+            const row = document.querySelector(`#v-eval tr.row[data-id="${ev.id}"]`);
+            if (row) { row.classList.remove('running'); row.classList.add(ev.ok ? 'just-pass' : 'just-fail'); }
+            $('#rlog').insertAdjacentHTML('afterbegin',
+              `<div><b class="${ev.ok ? 'p' : 'f'}">${ev.ok ? 'PASS' : 'FAIL'}</b> ${esc(ev.id)}　${
+                ev.elapsed_ms ? (ev.elapsed_ms / 1000).toFixed(1) + 's' : '—'}　${ev.steps ?? '—'} 步　${
+                ev.tokens || '—'} tok　${ev.cost_cny != null ? '¥' + ev.cost_cny.toFixed(4) : '—'}${
+                ev.problems?.length ? '　' + esc(ev.problems.join('；')) : ''}</div>`);
+          } else if (ev.type === 'done') {
+            $('#rtitle').textContent = passed === total ? '全部通过' : '执行完成';
+            $('#rcur').textContent = '指标已更新';
+            await loadEval();
+          } else if (ev.type === 'error') {
+            $('#rtitle').textContent = '执行失败'; $('#rcur').textContent = ev.error;
+          }
+        }
+      }
+    } catch (e) {
+      $('#rtitle').textContent = '执行中断'; $('#rcur').textContent = String(e);
+    } finally { btns.forEach(b => b.disabled = false); }
+  };
+  $('#runAll').onclick = () => run([]);
+  $('#runSel').onclick = () => {
+    const ids = [...document.querySelectorAll('#v-eval input.pick:checked')].map(i => i.value);
+    if (!ids.length) { alert('请先在用例表里勾选要执行的条目'); return; }
+    run(ids);
+  };
+}
+
+wireRun();
+show((location.hash || '#eval').slice(1));
+</script>
+</body>
+</html>

@@ -1,0 +1,108 @@
+# 回归用例。S = 随题示例问题，Q = 公开考察问题。
+#
+# 断言写法约定（踩过五次同一个坑后定下的）：
+#   must_include    只用于模型必然逐字复现的 token：工单号、枚举值、时间戳、型号。
+#                   凡是自然语言表述（「不合规」「没有工单」「不应更换」）一律不要用，
+#                   模型换个说法就误判。
+#   must_match      正则，用于一切自然语言判定，把同义表述写进选择分支；
+#                   涉及中英混排时用 \s* 吸收空格（模型会写「DSP 控制单板」）。
+#   must_not_include 尽量不用。否定表述天然包含肯定子串（「不构成重复故障」含
+#                   「构成重复故障」），规程原文也含大量数字。
+# 断言只作用于模型自己说的话（answer + basis + unverifiable），不作用于 evidence 原文。
+# 这 11 条是回归基线，不是实现边界——现场会用同类问题检验，规则与映射必须全覆盖。
+
+- id: S1
+  question: T01 的风机型号是什么？根据其最新一条告警记录，最近一次运行状态是什么？
+  sources: [alarm_records]
+  assert:
+    must_include: ["OWT-5.0A", "RUNNING", "2026-07-17 04:10:00"]
+
+- id: S2
+  question: 24006_SC_变流器低穿激活的触发条件和处理建议是什么？
+  sources: [fault_manual]
+  assert:
+    # 这里要的是「不建议换件」这个结论，不能对「更换部件」做子串否定 ——
+    # 正确答案本身就是「不应无依据建议更换部件」，包含该子串。
+    # 自然语言上的否定断言一律用正则匹配否定表述，不要用 must_not_include。
+    must_include: ["低穿", "电网"]
+    must_match: ["(不应|不得|不要|无需|不建议).{0,12}更换"]
+
+- id: S3
+  question: T05 当前的急停故障是否已经得到符合规定的工单安排？
+  sources: [alarm_records, maintenance_records, safety_regulation]
+  assert:
+    must_include: ["WO-260705", "EMERGENCY"]
+    must_match: ["(不合规|不符合|未符合|不恰当|没有得到|尚未得到|应.{0,4}升级)"]
+
+- id: S4
+  question: T08 的 24010 故障是否已经具备立即更换控制单板的条件？
+  sources: [alarm_records, maintenance_records, fault_manual, safety_regulation]
+  assert:
+    must_include: ["无法确认"]
+    must_match:
+      # 模型有时写「DSP 控制单板」有时写「DSP控制单板」，必须吸收空格
+      - "DSP\\s*控制单板"
+      - "(不具备|不能认定|尚不具备|不满足|不应.{0,6}更换)"
+
+- id: Q1
+  question: 请查询 T06，并回答：1. 风机型号是什么？2. 最新一条告警记录对应的运行状态是什么？3. 该记录发生在什么时间？
+  sources: [alarm_records]
+  assert:
+    # 最新一条是 2026-07-18 09:10:00 / STOPPED；若模型取成 07-15 那条会得到 LIMITED
+    must_include: ["OWT-5.0A", "STOPPED", "2026-07-18 09:10:00"]
+
+- id: Q2
+  question: 请查询 T04 在 2026-07-10 00:00:00 至 2026-07-15 23:59:59 期间的告警记录，并列出每条记录的发生时间、告警代码和告警状态。
+  sources: [alarm_records]
+  assert:
+    # 闭区间内恰好两条；漏掉任一条或多带进窗口外记录都会挂
+    must_include:
+      - "2026-07-11 02:40:00"
+      - "24001"
+      - "2026-07-14 22:05:00"
+      - "24013"
+      - "CLEARED"
+
+- id: Q3
+  question: 请根据故障处理手册回答 24002_SC_变流器心跳：1. 常见原因有哪些？2. 建议先检查哪些项目？3. 更换通讯模块前最重要的安全注意事项是什么？
+  sources: [fault_manual]
+  assert:
+    must_include: ["母线电压"]
+    must_match: ["20\\s*V"]
+
+- id: Q4
+  question: 检修作业与安全管理规程规定，哪些情形禁止远程强制复位或继续依赖反复远程复位？
+  sources: [safety_regulation]
+  assert:
+    must_include: ["急停", "安全链", "单板"]
+    must_match: ["3\\s*次"]
+
+- id: Q5
+  question: 请分析 T03 的 24002_SC_变流器心跳：1. 在 2026-07-18 08:00:00 至 2026-07-19 08:00:00 内发生了多少次？2. 按规程是否属于重复故障，当前 NORMAL 工单应调整为什么优先级？3. 是否还能继续反复远程复位？若不能，首先应检查什么？
+  sources: [alarm_records, maintenance_records, safety_regulation]
+  assert:
+    # 「4 次」是真正的判别点：算成 3 次（漏掉跨日那条）或 5 次（把 07-05 那条超窗记录
+    # 也累计进来）都不会出现这个词。不要对「3 次」做否定断言——规程原文就写着
+    # 「3 次及以上」，模型引用条款时必然出现。
+    must_include: ["重复故障", "HIGH"]
+    must_match:
+      - "4\\s*次"
+      - "(不能|不得|禁止|停止).{0,12}复位"
+
+- id: Q6
+  question: 请检查 T09 的 24011_SC_主变流器EEPROM参数回默认值 已完成工单：1. 该工单是否符合关闭要求？2. 处理备注缺少哪些关键信息？3. 15 分钟观察时间是否达到规程要求？
+  sources: [maintenance_records, safety_regulation]
+  assert:
+    must_include: ["120", "WO-260708"]
+    must_match: ["(不符合|不合规|未达到|不满足|未满足)"]
+
+- id: Q7
+  question: 请分析 T07 的 24012_SC_主变流器转矩与设定值偏差大：1. 在 2026-07-18 08:00:00 至 2026-07-19 08:00:00 内发生了多少次，是否达到重复故障标准？2. 数据库中是否已有 T07/24012 对应工单？3. 故障手册建议检查哪三个项目？
+  sources: [alarm_records, maintenance_records, fault_manual]
+  assert:
+    # 反向陷阱：窗口内只有 2 次，未达重复故障标准；且数据库里根本没有该工单。
+    # 否定断言不能用「构成重复故障」——「不构成重复故障」是包含它的。
+    must_match:
+      - "2\\s*次"
+      - "(未达到|不构成|未构成|不属于|尚未达到|未满足)"
+      - "(没有|不存在|未找到|无).{0,12}(工单|记录)"
