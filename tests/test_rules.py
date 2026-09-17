@@ -177,6 +177,57 @@ class TestCloseCompliance:
         assert r["is_compliant"] is None
         assert "不存在" in r["verdict"]
 
+    def test_cause_item_is_handed_over_not_guessed(self):
+        """①「实际故障原因」不做关键词判定。
+
+        WO-260712 的备注写着「确认风扇轴承卡滞」——轴承卡滞就是实际故障原因，
+        但一个「原因/因为/由于/根因/查明」都不占。按关键词判会判成缺失，
+        而且模型不会质疑它，会替它编出合理化说辞。
+        """
+        r = close_compliance("WO-260712")
+        cause = [c for c in r["facts"]["逐项核对"] if c["项"].startswith("①")][0]
+        assert cause["状态"] == "需对照原文认定"
+        assert "轴承卡滞" in cause["备注原文"]
+        assert not any(x.startswith("①") for x in r["facts"]["未在备注中体现"])
+
+    def test_only_the_designed_bad_order_is_a_hard_violation(self):
+        """11 张已完成工单里，硬性违规只有 WO-260708 一张。
+
+        上一版 11 张全判「不合规」——阳性率 100% 的检测器没有判别力，
+        三条硬性违规的 WO-260708 和只差两句说明的 WO-260712 压成同一个标签，
+        值班的人分不出哪张要紧。
+        """
+        import sqlite3
+        conn = sqlite3.connect("data/海上风电维检.db")
+        ids = [row[0] for row in conn.execute(
+            "SELECT work_order_id FROM maintenance_records WHERE status='COMPLETED'")]
+        hard = [i for i in ids if close_compliance(i)["verdict_kind"] == "硬性违规"]
+        assert len(ids) == 11
+        assert hard == ["WO-260708"]
+
+    def test_unclosed_order_is_not_judged_for_closure(self):
+        """WO-260703 状态 OPEN、备注为空。第 6.1~6.4 条是关闭**前**的要求，
+        此时判「七项全缺、不合规」字面没错，却让人以为这张单关错了。"""
+        r = close_compliance("WO-260703")
+        assert r["verdict_kind"] == "未关闭"
+        assert "尚未关闭" in r["verdict"]
+
+    def test_param_item_not_triggered_by_bare_recovery(self):
+        """WO-260702 写的是「等待电网电压恢复」，不是参数恢复。
+
+        「恢复」原先在 ④ 的词表里，会把没写参数的单子判成写了——
+        与 ① 相反方向的同一种错。
+        """
+        r = close_compliance("WO-260702")
+        assert any(x.startswith("④") for x in r["facts"]["未在备注中体现"])
+
+    def test_matched_terms_returned_for_audit(self):
+        """判「已记录」必须说清楚是哪个词命中的，否则同样不可复核。"""
+        r = close_compliance("WO-260709")
+        row = [c for c in r["facts"]["逐项核对"] if c["项"].startswith("③")][0]
+        assert row["状态"] == "已记录"
+        assert "更换" in row["命中词"]
+
 
 class TestReplacePrecondition:
     def test_nine_items_checked_seven_unverifiable(self):

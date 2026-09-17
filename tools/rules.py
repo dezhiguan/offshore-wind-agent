@@ -402,15 +402,39 @@ def remote_reset_ban(turbine_id: str, fault_code: str) -> dict[str, Any]:
 
 # 第 6.1 条七项必备记录。关键词判定是启发式的，所以结果里一并返回备注原文，
 # 便于人工复核——不假装这是精确判定。
+# 第 6.1 条前六项。判据分两类，这个区分是这条规则的全部要点：
+#
+#   关键词可判的：②③④⑤⑥ 要找的都是**具体动作词**——更换、复位、复检、参数、固化。
+#     写没写这些动作，词面上基本能看出来，漏判的代价也只是提示人去对一眼原文。
+#
+#   关键词判不了的：① 实际故障原因。「原因」是个概念，可以用任何名词短语表达——
+#     「确认风扇轴承卡滞」「确认短时电网波动」都是在写原因，一个关键词都不占。
+#     上一版按「原因/因为/由于/根因/查明」判，11 张已完成工单 11 张判缺失，
+#     其中写明了原因的照判不误；更糟的是模型不会质疑这个结论，会替它编出
+#     「备注仅写…未构成对故障原因的完整记录判定」这种合理化说辞。
+#     阳性率 100% 的检测器没有判别力，只是在稳定地说同一句错话。
+#
+# 所以 ① 不再猜，改为把备注原文交出去、标成「需对照原文认定」。规则层不假装
+# 自己能做语义判断——这跟次数、时长、阈值不一样，那些才是代码该算的。
 _CLOSE_ITEMS = [
-    ("① 实际故障原因", ("原因", "因为", "由于", "根因", "查明")),
-    ("② 处理措施", ("处理", "清理", "紧固", "更换", "检查", "复核", "调整", "修复")),
+    # 「核对」「排查」「检测」原先不在表里，WO-260711 的「核对电网波动记录和采样回路」
+    # 因此被判成没写处理措施——同一档动作词漏收，跟 ① 是两回事，补齐即可。
+    ("② 处理措施", ("处理", "清理", "紧固", "更换", "检查", "检测", "核对",
+                   "复核", "排查", "调整", "修复")),
     ("③ 更换部件（未更换应说明）", ("更换", "未更换", "无需更换", "不需要更换")),
-    ("④ 参数恢复或固化（不适用应说明）", ("参数", "恢复", "固化", "不适用")),
+    # 「恢复」原本也在这一档，但它太泛了：「等待电网电压恢复」「柜温恢复正常」
+    # 都会命中，把没写参数的单子判成写了——与 ① 相反方向的同一种错。
+    ("④ 参数恢复或固化（不适用应说明）", ("参数", "固化", "不适用")),
     ("⑤ 故障复位结果", ("复位", "解除", "消除", "清除")),
     ("⑥ 完整复检结果", ("复检", "复核", "验证", "复测")),
-    ("⑦ 处理后观察时间", ()),  # 由 observation_minutes 字段判定
 ]
+_CAUSE_ITEM = "① 实际故障原因"
+
+# 第 6.2 条与第 6.4 条的适用范围差一类，原先混成了一个判据。
+#   第 6.2 条：重复性故障、EEPROM 参数异常、控制单板故障、**通讯模块故障**
+#   第 6.4 条：重复性故障、EEPROM 异常、控制单板故障
+_BOARD_FAULT_KEYS = ("控制单板", "接口板")
+_COMM_FAULT_KEYS = ("通讯模块",)
 _EEPROM_ITEMS = [
     ("开机设置", ("开机", "设置")),
     ("参数恢复与固化情况", ("参数", "固化")),
@@ -439,62 +463,119 @@ def close_compliance(work_order_id: str) -> dict[str, Any]:
     manual = _manual_text(code)
     is_eeprom = "EEPROM" in manual.upper() or "EEPROM" in (note or "").upper()
     repeat = repeat_fault(o["turbine_id"], code)
-    needs_120 = is_eeprom or repeat["is_repeat_fault"] or any(
-        k in manual for k in ("控制单板", "接口板", "通讯模块"))
+    is_board = any(k in manual for k in _BOARD_FAULT_KEYS)
+    is_comm = any(k in manual for k in _COMM_FAULT_KEYS)
+    needs_120 = is_eeprom or repeat["is_repeat_fault"] or is_board            # 第 6.4 条
+    in_622_scope = needs_120 or is_comm                                      # 第 6.2 条
 
-    checks, missing = [], []
-    for label, keys in _CLOSE_ITEMS[:-1]:
-        present = bool(note) and any(k in note for k in keys)
-        checks.append({"项": label, "是否记录": present})
-        if not present:
-            missing.append(label)
+    # 第 6.1~6.4 条管的是「关闭前应当记录什么」。工单还没关就拿关闭合规去判它，
+    # 问出来的是个伪命题：WO-260703 状态 OPEN、备注为空，判「七项全缺、不合规」
+    # 字面没错，却让人以为这张单关错了——它根本还没关。
+    if o["status"] != "COMPLETED":
+        return {
+            "ok": True, "rule": "close_compliance", "is_compliant": None,
+            "verdict_kind": "未关闭",
+            "verdict": "工单 %s 当前状态为 %s，尚未关闭。第 6.1~6.4 条是**关闭前**的记录要求，"
+                       "此时无所谓关闭是否合规。若要评估当前安排是否恰当，"
+                       "请改用 work_order_assessment 规则。" % (work_order_id, o["status"]),
+            "facts": {"工单": {k: o[k] for k in ("work_order_id", "turbine_id", "fault_code",
+                                                 "priority", "status", "observation_minutes")},
+                      "处理备注原文": note or None},
+            "unverifiable": [], "clauses": [],
+        }
+
+    # —— 第 6.1 条前六项：能判的判，判不了的把原文交出去 ——
+    checks, unrecorded = [], []
+    if note:
+        checks.append({"项": _CAUSE_ITEM, "状态": "需对照原文认定",
+                       "备注原文": note,
+                       "要求": "从上述原文中指出记载故障原因的片段；指不出即为未记录。"
+                               "不要按关键词判——「轴承卡滞」「电网波动」都是在写原因。"})
+    else:
+        checks.append({"项": _CAUSE_ITEM, "状态": "未见", "备注原文": None,
+                       "要求": "处理备注为空，无可认定的内容。"})
+        unrecorded.append(_CAUSE_ITEM)
+
+    for label, keys in _CLOSE_ITEMS:
+        hit = [k for k in keys if note and k in note]
+        checks.append({"项": label, "状态": "已记录" if hit else "未见",
+                       "命中词": hit or None})
+        if not hit:
+            unrecorded.append(label)
 
     obs_ok = obs is not None and (obs >= MIN_OBSERVATION_MINUTES if needs_120 else True)
-    checks.append({"项": "⑦ 处理后观察时间", "是否记录": obs is not None,
+    checks.append({"项": "⑦ 处理后观察时间",
+                   "状态": "已记录" if obs is not None else "未见",
                    "分钟": obs,
                    "门限": MIN_OBSERVATION_MINUTES if needs_120 else "本类故障规程未设最低门限",
                    "是否达标": obs_ok})
     if obs is None:
-        missing.append("⑦ 处理后观察时间")
+        unrecorded.append("⑦ 处理后观察时间")
 
-    restart_only = bool(note) and any(k in note for k in _NO_RESTART_ONLY) and len(missing) >= 3
+    # 第 6.2 条判据改为直接依据条文，不再挂靠「缺了几项」这种间接量：
+    # 属于该条列举的四类故障 + 备注提到重新上电 + 除此之外没有实质处理与复检记录。
+    recorded_labels = {c["项"] for c in checks if c.get("状态") == "已记录"}
+    restart_only = (
+        bool(note) and any(k in note for k in _NO_RESTART_ONLY) and in_622_scope
+        and not any(lbl.startswith(("②", "⑥")) for lbl in recorded_labels)
+    )
     eeprom_missing = []
     if is_eeprom:
         for label, keys in _EEPROM_ITEMS:
             if not (note and any(k in note for k in keys)):
                 eeprom_missing.append(label)
 
-    reasons = []
-    if missing:
-        reasons.append("第 6.1 条必备记录缺失：%s" % "、".join(missing))
+    # 硬性违规（可计算、无歧义）与记录未覆盖（需对照原文）分开报。
+    # 混成一个「不合规」，WO-260708 这种三条硬性违规的单子，和只差两句说明的
+    # WO-260712 就看不出轻重——值班的人分不清哪张要紧。
+    blocking = []
     if needs_120 and not obs_ok:
-        reasons.append("第 6.4 条要求观察时间不少于 %d 分钟，实际为 %s 分钟" % (
-            MIN_OBSERVATION_MINUTES, obs if obs is not None else "未记录"))
+        blocking.append("第 6.4 条要求观察时间不少于 %d 分钟，实际为 %s" % (
+            MIN_OBSERVATION_MINUTES,
+            "%d 分钟" % obs if obs is not None else "未记录"))
     if restart_only:
-        reasons.append("第 6.2 条：不得只以「重新上电后故障消失」作为关闭依据")
+        blocking.append("第 6.2 条：本类故障不得只以「重新上电后故障消失」作为关闭依据")
     if eeprom_missing:
-        reasons.append("第 6.3 条 EEPROM 参数异常还应记录：%s" % "、".join(eeprom_missing))
+        blocking.append("第 6.3 条 EEPROM 参数异常还应记录：%s" % "、".join(eeprom_missing))
 
-    compliant = not reasons
-    verdict = (
-        "工单 %s 不符合关闭要求。%s。注意第 6.5 条：status=%s 只是数据库状态，不能证明关闭过程合规。"
-        % (work_order_id, "；".join(reasons), o["status"])
-        if not compliant else
-        "工单 %s 在现有记录范围内未发现与第 6.1~6.4 条冲突之处；但按第 6.5 条，"
-        "数据库状态本身不能证明关闭过程合规。" % work_order_id
-    )
+    tail = "按第 6.5 条，status=%s 只是数据库状态，不能证明关闭过程合规。" % o["status"]
+    if blocking:
+        kind = "硬性违规"
+        verdict = "工单 %s 不符合关闭要求：%s。%s" % (work_order_id, "；".join(blocking), tail)
+        if unrecorded:
+            verdict += "另有第 6.1 条 %d 项未在处理备注中体现：%s。" % (
+                len(unrecorded), "、".join(unrecorded))
+    elif unrecorded:
+        kind = "记录待补"
+        verdict = ("工单 %s 未发现第 6.2~6.4 条的硬性违规；但第 6.1 条有 %d 项未在处理备注中体现："
+                   "%s。%s" % (work_order_id, len(unrecorded), "、".join(unrecorded), tail))
+    else:
+        kind = "未见冲突"
+        verdict = "工单 %s 在可判定范围内未发现与第 6.1~6.4 条冲突之处。%s" % (work_order_id, tail)
+    if note:
+        verdict += "第 6.1 条①「实际故障原因」不做关键词判定，请对照备注原文认定：「%s」" % note
+
     return {
-        "ok": True, "rule": "close_compliance", "is_compliant": compliant,
+        "ok": True, "rule": "close_compliance",
+        # False 只给可计算的硬性违规；None = 尚有需对照原文认定的项，不代表合规
+        "is_compliant": False if blocking else None,
+        "verdict_kind": kind,
         "verdict": verdict,
         "facts": {"工单": {k: o[k] for k in ("work_order_id", "turbine_id", "fault_code",
                                              "priority", "status", "observation_minutes")},
                   "处理备注原文": note or None,
                   "是否适用 120 分钟门限": needs_120,
+                  "第 6.2 条适用": in_622_scope,
                   "逐项核对": checks,
-                  "缺失项": missing},
-        "unverifiable": ["处理备注为自由文本，逐项判定基于关键词匹配，"
-                         "最终应由人工对照备注原文复核（原文已随结果返回）"],
-        "clauses": ["6.1", "6.4", "6.5"] + (["6.2"] if restart_only else []) + (["6.3"] if is_eeprom else []),
+                  "硬性违规": blocking,
+                  "未在备注中体现": unrecorded},
+        "unverifiable": [
+            "①「实际故障原因」是自由文本的语义判定，规则层不做——"
+            "备注原文已随结果返回，须对照原文认定。",
+            "②~⑥ 按动作词匹配，命中词已随结果返回；措辞特殊时仍应对照原文复核。",
+        ],
+        "clauses": (["6.1", "6.5"] + (["6.4"] if needs_120 else [])
+                    + (["6.2"] if restart_only else []) + (["6.3"] if is_eeprom else [])),
     }
 
 

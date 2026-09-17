@@ -59,20 +59,38 @@ def _from_close(result: dict[str, Any]) -> dict[str, Any] | None:
     wo = facts.get("工单", {})
     items = []
     for r in rows:
-        if "是否记录" in r:
-            recorded = bool(r.get("是否记录"))
-            note = ""
-            if "分钟" in r:
-                lim = r.get("门限")
-                note = "实际 %s 分钟，门限 %s" % (r.get("分钟"), lim)
-                recorded = bool(r.get("是否达标"))
+        state = r.get("状态")
+        if not state:
+            continue
+        # 关单记录缺失是**已知的缺失**，不是"无法确认"——备注原文就在库里，
+        # 是它没写，不是我们查不到。所以「未见」是 blocked 而非 pending。
+        #
+        # 但 ①「实际故障原因」是第三种情况：原文在，规则层判不了语义，
+        # 得有人对着原文认定。这既不是"已记录"也不是"缺失"，压成任何一边
+        # 都是在替人下结论——上一版压成"缺失"，11 张单全判缺，没一张对。
+        if "分钟" in r:
+            ok = bool(r.get("是否达标"))
             items.append({
                 "label": r.get("项", ""),
-                # 关单记录缺失是**已知的缺失**，不是"无法确认"——备注原文就在库里，
-                # 是它没写，不是我们查不到。
-                "state": "ok" if recorded else "blocked",
-                "note": note or ("已记录" if recorded else "处理备注中未见"),
-                "verdict": "已记录" if recorded else "缺失",
+                "state": "ok" if ok else "blocked",
+                "note": "实际 %s 分钟，门限 %s" % (r.get("分钟"), r.get("门限")),
+                "verdict": "达标" if ok else ("未记录" if r.get("分钟") is None else "不足"),
+            })
+        elif state == "需对照原文认定":
+            items.append({
+                "label": r.get("项", ""),
+                "state": "pending",
+                "note": "对照备注原文认定：%s" % (r.get("备注原文") or ""),
+                "verdict": "待认定",
+            })
+        else:
+            ok = state == "已记录"
+            hit = r.get("命中词")
+            items.append({
+                "label": r.get("项", ""),
+                "state": "ok" if ok else "blocked",
+                "note": ("命中：%s" % "、".join(hit)) if hit else "处理备注中未见",
+                "verdict": "已记录" if ok else "缺失",
             })
     return {
         "key": "close_compliance",
