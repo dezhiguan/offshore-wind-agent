@@ -142,6 +142,10 @@ section.blk{margin-bottom:26px}
 .track{position:relative;height:8px;background:var(--sunken);border-radius:4px;overflow:visible}
 .track i{position:absolute;inset:0 auto 0 0;background:var(--accent);border-radius:4px}
 .track i.near{background:var(--warn)}
+/* 试图水位：拒绝不计费，所以它压在实线之外——画成斜纹，区别于真的进了上下文的量 */
+.track i.att{background:repeating-linear-gradient(135deg,var(--crit) 0 3px,transparent 3px 6px);
+  opacity:.55}
+.pc .att{font-size:11px;font-weight:700;color:var(--crit);letter-spacing:0}
 .track .lim{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--crit);border-radius:1px}
 .mt .foot{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;
   color:var(--muted);margin-top:8px}
@@ -506,12 +510,17 @@ function metric(label, badge, val, unit, sub, cls, trend) {
 }
 
 // 数字回答"多少"，仪表回答"离限还有多远"——上下文用量的重点是后者。
-function meter(label, value, limit, foot) {
+// attempt = 被护栏拒绝的那一刻"想压到的水位"。它不在用量里（拒绝不计费），
+// 但它才是唯一能越过阈值的数——只画已计费的覆盖率，撞线永远看不见。
+function meter(label, value, limit, foot, attempt) {
   const v = value ?? 0, ratio = Math.min(100, v / limit * 100);
+  const hit = attempt != null && attempt > v;
   return `<div class="mt">
     <div class="row"><span class="lb">${label}</span>
-      <span class="pc">${v.toFixed(1)}<small>%</small></span></div>
-    <div class="track"><i class="${ratio > 75 ? 'near' : ''}" style="width:${v}%"></i>
+      <span class="pc">${hit ? `<span class="att" title="护栏拒绝前试图压到的水位">试图 ${
+        attempt.toFixed(1)}%</span> ` : ''}${v.toFixed(1)}<small>%</small></span></div>
+    <div class="track">${hit ? `<i class="att" style="width:${Math.min(100, attempt)}%"></i>` : ''}
+      <i class="${ratio > 75 || hit ? 'near' : ''}" style="width:${v}%"></i>
       <span class="lim" style="left:${limit}%"></span></div>
     <div class="foot"><span>0</span><span>阈值 ${limit}%</span><span>100</span></div>
     <div class="cap-note">${foot}</div></div>`;
@@ -682,9 +691,9 @@ async function loadEval() {
 
     <section class="blk">${hd('上下文红线', '读到了多少语料 · 去重口径 · 峰值')}
       <div class="meters">
-        ${meter('数据行覆盖', t.peak_db_rows_pct, 50,
+        ${meter('数据行覆盖', t.peak_db_rows_pct, t.limit_row_pct ?? 50,
           '题面要求不得将整个数据库放入上下文。系统在每次工具调用前预检，<b>覆盖</b>（去重）与<b>累计取回</b>（含重复）任一超阈值即拒绝并要求收窄查询。')}
-        ${meter('文档字符覆盖', t.peak_doc_chars_pct, 70,
+        ${meter('文档字符覆盖', t.peak_doc_chars_pct, t.limit_doc_pct ?? 70,
           '文档侧阈值放宽到 <b>70%</b>：一个复杂合规问题天然需要 5~8 个条款加一节手册，定在 50% 会误伤正常取证。')}
       </div></section>
 
@@ -746,7 +755,7 @@ async function loadOnline() {
         <div>
           <div class="big${(s.success_rate ?? 0) >= 90 ? '' : ' bad'}">${
             s.success_rate ?? '—'}<small>%</small></div>
-          <div class="cap">正常收口 · <b>${s.success} / ${s.count}</b> 次问答</div>
+          <div class="cap">过程无降级 · <b>${s.success} / ${s.count}</b> 次问答</div>
         </div>
         <div>
           <div class="seg">${items.slice().reverse().map(t =>
@@ -760,24 +769,44 @@ async function loadOnline() {
           </div>
         </div>
       </div>
-      <p class="note">样本 = 进程内留存的最近 <b>${s.count} / ${s.capacity}</b> 次真实问答（${
+      <p class="note">样本 = 进程内留存的最近 <b>${s.count}</b> 次真实问答（${
         esc(s.earliest_at || '')} → ${esc(s.latest_at || '')}），<b>重启即清空</b>；
-        后台跑的回归用例不计入本档。左起为最早一次，逐格向右为最新。</p>
+        后台跑的回归用例不计入本档。左起为最早一次，逐格向右为最新。<br>
+        留存共 <b>${s.capacity}</b> 格，<b>线上与回归共用</b>：已占 ${s.capacity_used ?? s.count} 格${
+          (s.capacity_used ?? s.count) > s.count
+            ? `，其中回归 <b>${(s.capacity_used ?? s.count) - s.count}</b> 格` : ''}。
+        跑一轮回归会挤掉同样多的线上链路，这一档的样本量会因此变小。${
+          d.replay_mode ? `<br><b class="warn">当前处于离线回放模式</b>：问答走的是 eval 落盘产物，
+            不产生新链路，本档停在上次实时跑的数据上。` : ''}</p>
     </section>
 
     <section class="blk">${hd('回答可用性', '答了什么 · 拒了什么 · 标了什么')}
       <div class="grid">
         ${metric('有效回答率', 'ANSWERED', s.answer_rate, '%',
                  `${s.answered} / ${s.count} 次产出可用回答${
-                   s.refused ? `（拒答 ${s.refused} 次不计）` : ''}`, grade(s.answer_rate, 95, 80))}
+                   s.refused ? `（拒答 ${s.refused} 次不计）` : ''}${
+                   s.format_fallback ? `；其中 ${s.format_fallback} 次未按三段格式输出` : ''}`,
+                 grade(s.answer_rate, 95, 80))}
         ${metric('未取证拒答率', 'REFUSED', s.refused_rate, '%',
                  `${s.refused} 次未调用任何工具，宁可不答 —— 护栏生效，不是故障`)}
-        ${metric('标注存疑占比', 'FLAGGED', s.flagged_rate, '%',
-                 `${s.flagged_traces} 次回答带「现有资料无法确认」`)}
+        ${metric('自报存疑占比', 'SELF-FLAGGED', s.flagged_rate, '%',
+                 `${s.flagged_traces} 次回答自己带「现有资料无法确认」`)}
+        ${metric('接地校验存疑', s.grounding_mode ? s.grounding_mode.toUpperCase() : 'OFF',
+                 s.grounding_flagged_rate, '%',
+                 s.grounding_checked
+                   ? `${s.grounding_flagged_traces} / ${s.grounding_checked} 次回答出现证据里找不到的数字或条款（共 ${
+                       s.grounding_flagged_items} 处）${
+                       s.grounding_mode === 'shadow' ? ' —— 影子档只标注，未改动回答' : ''}`
+                   : '未开启校验，本档无数据',
+                 s.grounding_checked ? grade(100 - (s.grounding_flagged_rate ?? 0), 90, 75) : '')}
       </div>
-      <p class="note">线上拿不到标准答案，判不出"答得对不对"。这三项是能确认的部分：
-        <b>答没答</b>、<b>该不答时有没有停住</b>、<b>没把握时有没有标出来</b>。
-        要判对错请到「离线评测」，那里有断言。</p>
+      <p class="note">线上拿不到标准答案，判不出"答得对不对"。这四项是能确认的部分：
+        <b>答没答</b>、<b>该不答时有没有停住</b>、<b>没把握时有没有自己标出来</b>、
+        <b>标出来的之外有没有编</b>。前三项都以模型自己的输出为准——它不写那一段，占比就是 0，
+        不等于没有存疑；第四项是代码逐个核对回答里的数字与条款号在不在本次证据里，
+        与模型怎么说无关。要判对错请到「离线评测」，那里有断言。${
+          s.format_fallback ? `<br>另有 <b>${s.format_fallback}</b> 次三段格式未解析出来，
+            回答回落为整段原文：这几条的「自报存疑」拆不出来，占比是偏低的。` : ''}</p>
     </section>
 
     <section class="blk">${hd('执行健康', '过程是否按预期收口')}
@@ -798,20 +827,27 @@ async function loadOnline() {
       <div class="grid">
         ${metric('P95 端到端耗时', 'LATENCY', s.p95_ms == null ? null
                  : (s.p95_ms / 1000).toFixed(1), 's', s.p50_ms == null ? ''
-                 : `P50 ${(s.p50_ms / 1000).toFixed(1)}s · 样本 ${s.count}`)}
+                 : `P50 ${(s.p50_ms / 1000).toFixed(1)}s · 样本 ${s.latency_samples ?? s.count}${
+                     (s.latency_samples ?? s.count) < 100 ? '（样本少，分位数只由末几条决定）' : ''}`)}
         ${metric('平均 Token 消耗', 'PER TASK', s.avg_tokens, '',
-                 `${s.model_calls} 次模型调用`)}
+                 `${s.count} 次问答 · 累计 ${((s.avg_tokens || 0) * s.count / 10000).toFixed(1)} 万 tok`)}
         ${metric('单次问答成本', 'CNY', s.avg_cost == null ? null
                  : '¥' + s.avg_cost.toFixed(4), '', `累计 ¥${(s.total_cost || 0).toFixed(4)}`)}
       </div></section>
 
     <section class="blk">${hd('上下文红线', '真实提问读到了多少语料 · 峰值')}
       <div class="meters">
-        ${meter('数据行覆盖', s.peak_db_rows_pct, 50,
-          '线上峰值，<b>去重口径</b>：同一批行被两条 SQL 各查一次只算一次。每次工具调用前预检，覆盖档与累计取回档任一超阈值即拒绝并要求收窄查询。')}
-        ${meter('文档字符覆盖', s.peak_doc_chars_pct, 70,
-          '线上峰值，<b>去重口径</b>：同一节先被检索命中、后被整节取回，按见过的最大篇幅算一次。文档侧阈值放宽到 <b>70%</b>：一个复杂合规问题天然需要 5~8 个条款加一节手册。')}
+        ${meter('数据行覆盖', s.peak_db_rows_pct, s.limit_row_pct ?? 50,
+          '线上峰值，<b>去重口径</b>：同一批行被两条 SQL 各查一次只算一次。每次工具调用前预检，覆盖档与累计取回档任一超阈值即拒绝并要求收窄查询。',
+          s.peak_attempt_db_rows_pct)}
+        ${meter('文档字符覆盖', s.peak_doc_chars_pct, s.limit_doc_pct ?? 70,
+          `线上峰值，<b>去重口径</b>：同一节先被检索命中、后被整节取回，按见过的最大篇幅算一次。文档侧阈值放宽到 <b>${
+            s.limit_doc_pct ?? 70}%</b>：一个复杂合规问题天然需要 5~8 个条款加一节手册。`,
+          s.peak_attempt_doc_chars_pct)}
       </div>
+      ${s.guard_refusals ? `<p class="note"><b class="warn">护栏已触发 ${s.guard_refusals} 次</b>：
+        被拒绝的取证不进用量，所以上面两条实线永远停在阈值以下 —— 斜纹段才是被拦下时想压到的水位。
+        只看实线会读成"离红线还有余量"，而这些链路其实已经被拦过。</p>` : ''}
       <p class="note">这两条是<b>语料覆盖率</b>，回答"读到了随题资料的百分之多少"。
         工具返回真正注入上下文的字符数另计（含 JSON 结构与规则结论，不是语料原文），
         线上峰值 <b>${(s.peak_context_chars ?? 0).toLocaleString()}</b> 字符 —— 两个数问的不是同一件事，
@@ -1060,7 +1096,9 @@ async function selectTrace(id) {
       <div class="ids">${esc(d.short_id || '')} · ${
         SRC_LABEL[d.source === 'eval' ? 'eval' : 'online']} · ${esc(d.model || '')} · ${esc(d.at || '')}
         · <span title="${esc(budgetTitle(b))}">语料覆盖 ${(b.db_rows_pct ?? 0).toFixed(1)}% 行 / ${
-          (b.doc_chars_pct ?? 0).toFixed(1)}% 文档</span></div>
+          (b.doc_chars_pct ?? 0).toFixed(1)}% 文档</span>${
+          b.refusals ? ` · <span class="warn" title="被拒绝的取证不计入上面的覆盖率">护栏拒绝 ${
+            b.refusals} 次，试图压到 ${b.peak_attempt_db_rows_pct ?? 0}% 行</span>` : ''}</div>
       <div class="badges">${badges}</div>
     </div>
     ${d.notes?.length ? `<div class="anom">
@@ -1122,7 +1160,11 @@ function budgetTitle(b) {
   return [`语料覆盖（去重）：${b.db_rows} / ${b.db_rows_total} 行 · ${b.doc_chars} / ${b.doc_chars_total} 字符`,
     `累计取回（含重复）：${b.db_rows_drawn ?? b.db_rows} 行 · ${b.doc_chars_drawn ?? b.doc_chars} 字符`,
     `工具返回注入上下文：${b.context_chars ?? '—'} 字符（含 JSON 结构与结论文本，不是语料原文）`,
-    `红线：${b.limit_rows} 行 / ${b.limit_chars} 字符，两档任一超限即拒绝取证`].join('\n');
+    `红线：${b.limit_rows} 行 / ${b.limit_chars} 字符，两档任一超限即拒绝取证`,
+    /* 被拒的那次不进用量：不单独说一句，覆盖率会看着像"从没接近过红线" */
+    b.refusals ? `护栏拒绝 ${b.refusals} 次，被拒时试图压到 ${
+      b.peak_attempt_db_rows_pct ?? 0}% 行 / ${b.peak_attempt_doc_chars_pct ?? 0}% 文档（未计入上面的覆盖率）`
+      : ''].filter(Boolean).join('\n');
 }
 
 async function loadTraces() {

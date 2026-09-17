@@ -10,6 +10,7 @@ import os
 
 import pytest
 
+from agent import tracestore
 from agent.tracing import DEGRADED, ERROR, OK, Trace
 from tools import pricing
 
@@ -95,3 +96,114 @@ class TestPricingBasis:
                   "LLM_PRICE_CACHED_INPUT_PER_1K"):
             monkeypatch.delenv(k, raising=False)
         assert round(pricing.cost("qwen3.8-flash", 2870, 61, 2048), 6) == 0.001027
+
+
+class TestPercentile:
+    """P95 宁可偏保守，不能偏乐观 —— 偏乐观的那一版在最该示警时最好看。"""
+
+    def test_p95_does_not_drop_the_slowest_samples(self):
+        # 线上那 39 条的形状：原先取第 37 位（54.3s），把最慢的两条整个排除在外
+        values = list(range(1, 40))
+        assert tracestore._p95(values) == 38
+
+    def test_p95_of_a_single_sample_is_itself(self):
+        assert tracestore._p95([7]) == 7
+
+    def test_p95_of_nothing_is_none(self):
+        assert tracestore._p95([]) is None
+
+
+def _trace(**meta):
+    """造一条最小可留存链路：一次模型调用 + 一次工具调用。"""
+    tr = Trace()
+    tr.record("MODEL", "Agent 决策", prompt_tokens=100, completion_tokens=10, cost_cny=0.0001)
+    tr.record("TOOL", "query_db", status=OK)
+    base = {"stop_reason": "completed", "elapsed_ms": 1000, "steps": 1,
+            "format_parsed": True, "model": "qwen3.8-flash"}
+    base.update(meta)
+    return {"answer": "## 结论\n有结论", "unverifiable": [], "spans": tr.as_list(),
+            "trace_summary": tr.summary(), "meta": base}
+
+
+@pytest.fixture
+def store():
+    """链路留存是模块级的 deque，用例之间必须清干净。"""
+    tracestore._traces.clear()
+    yield tracestore
+    tracestore._traces.clear()
+
+
+class TestGroundingIsKept:
+    """接地校验默认跑 shadow：只标注、不改回答。结果不留存，影子跑就是白跑 ——
+    判定层要先标定再切 enforce，而标定靠的正是这批结果。"""
+
+    def test_shadow_result_survives_into_the_stats(self, store):
+        store.record("Q1", _trace(grounding={"mode": "shadow", "flagged": [
+            {"type": "number", "value": "480"}]}))
+        store.record("Q2", _trace(grounding={"mode": "shadow", "flagged": []}))
+        s = store.stats(source="online")
+        assert s["grounding_checked"] == 2
+        assert s["grounding_flagged_traces"] == 1
+        assert s["grounding_flagged_items"] == 1
+        assert s["grounding_flagged_rate"] == 50.0
+
+    def test_off_mode_is_not_a_clean_bill(self, store):
+        """关掉校验不等于零存疑：没检查过的不能进分母，否则关闭它像是质量变好了。"""
+        store.record("Q", _trace(grounding={"mode": "off", "flagged": []}))
+        s = store.stats(source="online")
+        assert s["grounding_checked"] == 0
+        assert s["grounding_flagged_rate"] is None
+
+
+class TestFormatFallbackIsVisible:
+    """三段标题没解析出来时回答回落成整段原文：非空、于是算"有效回答"，
+    而「现有资料无法确认」也拆不出来、于是"自报存疑"少算。一次降级同时
+    抬高一个指标、压低另一个，两处都不出声。"""
+
+    def test_fallback_is_counted(self, store):
+        store.record("Q", _trace(format_parsed=False))
+        assert store.stats(source="online")["format_fallback"] == 1
+
+    def test_fallback_degrades_the_chain(self, store):
+        store.record("Q", _trace(format_parsed=False))
+        item = store.listing(source="online")[0]
+        assert item["status"] == "DEGRADED"
+        assert any(n["kind"] == "格式降级" for n in item["notes"])
+
+    def test_a_failed_run_is_not_also_a_format_problem(self, store):
+        """链路中断时本来就没有正文，再报一条"格式降级"是噪音。"""
+        store.record("Q", _trace(stop_reason="llm_error", format_parsed=False),
+                     error="Timeout")
+        item = store.listing(source="online")[0]
+        assert item["status"] == "FAILED"
+        assert not any(n["kind"] == "格式降级" for n in item["notes"])
+
+
+class TestGuardRefusalIsVisible:
+    def test_attempted_watermark_reaches_the_stats(self, store):
+        store.record("Q", _trace(budget={"db_rows_pct": 46.8, "doc_chars_pct": 30.8,
+                                         "refusals": 1, "peak_attempt_db_rows_pct": 93.5,
+                                         "peak_attempt_doc_chars_pct": 30.8}))
+        s = store.stats(source="online")
+        assert s["guard_refusals"] == 1
+        # 已计费的覆盖率在阈值以下，试图水位在阈值以上 —— 界面要能同时看到两个
+        assert s["peak_db_rows_pct"] < s["limit_row_pct"]
+        assert s["peak_attempt_db_rows_pct"] > s["limit_row_pct"]
+
+    def test_threshold_follows_the_guard(self, store):
+        """红线画在哪必须跟着护栏的阈值走，不能在前端另写一份。"""
+        from tools import budget as budget_mod
+        store.record("Q", _trace())
+        s = store.stats(source="online")
+        assert s["limit_row_pct"] == budget_mod.MAX_ROW_RATIO * 100
+        assert s["limit_doc_pct"] == budget_mod.MAX_DOC_RATIO * 100
+
+
+class TestSampleWindowIsShared:
+    def test_eval_traces_occupy_the_same_50_slots(self, store):
+        """留存是所有来源共用的一格 deque：跑一轮回归会挤掉同样多的线上链路。
+        只报 count/capacity，样本被顶掉是悄无声息的。"""
+        store.record("线上", _trace())
+        store.record("回归", _trace(), source="eval")
+        s = store.stats(source="online")
+        assert s["count"] == 1 and s["capacity_used"] == 2

@@ -100,6 +100,8 @@ class ContextBudget:
         self.drawn_chars = 0
         # 展示量：工具返回实际注入上下文的字符总数
         self.context_chars = 0
+        # 被红线拦下的取证：拦截前的水位 + 这一次想压到哪
+        self.refusals: list[dict[str, Any]] = []
         totals = corpus_totals()
         self.max_rows = int(totals["db_rows"] * MAX_ROW_RATIO)
         self.max_chars = int(totals["doc_chars"] * MAX_DOC_RATIO)
@@ -158,6 +160,30 @@ class ContextBudget:
                        totals["doc_chars"]))
         return None
 
+    def note_refusal(self, draw: Draw, reason: str) -> None:
+        """记下一次被红线拒绝的取证 —— 拒绝**不 charge**，所以它不会留在用量里。
+
+        只报已计费的量，红线水位就永远画不出撞线：被拒的那次不进账，覆盖率停在
+        阈值以下，看板上写着"离红线还有余量"，而这条链路实际已经被拒过一次。
+        真正该看的是**试图压到的水位**——它可以超过阈值，也可以超过 100%。
+
+        两档共用同一个阈值、同一个单位，取两者较大的那个：它就是这一侧这次
+        想压到的最高水位，与是哪一档触发的无关。
+        """
+        totals = corpus_totals()
+        rows = max(self.db_rows + self._new_rows(draw),
+                   self.drawn_rows + len(draw.rows))
+        chars = max(self.doc_chars + self._new_chars(draw),
+                    self.drawn_chars + sum(c for _, c in draw.units))
+        pct = lambda num, den: round(num / den * 100, 1) if den else 0.0  # noqa: E731
+        self.refusals.append({
+            "reason": reason,
+            "attempt_db_rows": rows,
+            "attempt_doc_chars": chars,
+            "attempt_db_rows_pct": pct(rows, totals["db_rows"]),
+            "attempt_doc_chars_pct": pct(chars, totals["doc_chars"]),
+        })
+
     def charge(self, draw: Draw) -> None:
         self.drawn_rows += len(draw.rows)
         self.drawn_chars += sum(c for _, c in draw.units)
@@ -184,6 +210,12 @@ class ContextBudget:
             "context_chars": self.context_chars,
             "limit_rows": self.max_rows,
             "limit_chars": self.max_chars,
+            # 护栏拦截台账：没有拦截过就是 None，不是 0 —— 界面据此决定要不要出现这一行
+            "refusals": len(self.refusals),
+            "peak_attempt_db_rows_pct": max((r["attempt_db_rows_pct"] for r in self.refusals),
+                                            default=None),
+            "peak_attempt_doc_chars_pct": max((r["attempt_doc_chars_pct"] for r in self.refusals),
+                                              default=None),
         }
 
 

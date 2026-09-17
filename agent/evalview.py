@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from eval.verdict import SUITES, check  # noqa: E402
+from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO  # noqa: E402
 
 OUT_DIR = ROOT / "eval" / "out"
 EVAL_DIR = ROOT / "eval"
@@ -236,6 +237,9 @@ def load() -> dict[str, Any]:
             "passed": sum(1 for i in items if i["ok"]),
             "peak_db_rows_pct": max(pcts_row) if pcts_row else None,
             "peak_doc_chars_pct": max(pcts_doc) if pcts_doc else None,
+            # 红线画在哪跟着护栏的阈值走，不在前端另写一份
+            "limit_row_pct": round(MAX_ROW_RATIO * 100, 1),
+            "limit_doc_pct": round(MAX_DOC_RATIO * 100, 1),
         },
     }
 

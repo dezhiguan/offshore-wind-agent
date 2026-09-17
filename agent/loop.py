@@ -362,6 +362,9 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
                                 # 同一件事记两条，后台会把它读成"一次工具失败 + 一次护栏降级"，
                                 # 异常清单里也会出现两行同样的文字。
                                 guard = "上下文预算"
+                                # 拒绝不计入用量，水位会停在阈值以下 ——
+                                # 把"这次想压到哪"单独记下来，红线才画得出撞线
+                                budget.note_refusal(draw, refusal)
                                 result = {"ok": False, "error": refusal,
                                           "budget": budget.report()}
                             else:

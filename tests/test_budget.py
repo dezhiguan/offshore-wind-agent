@@ -196,3 +196,49 @@ class TestMeterCoverage:
         """未登记的工具不能按零计费——宁可高估被拦，也不要静默漏计。"""
         d = measure("some_future_tool", {"ok": True, "payload": "x" * 500})
         assert sum(c for _, c in d.units) > 400
+
+
+class TestRefusalLedger:
+    """被红线拒绝的那次取证不进用量 —— 于是覆盖率永远画不出撞线。
+
+    2026-09-17 复核线上 39 条链路时发现：峰值 46.8% 对着 50% 的阈值，看板上是
+    "还有 3.2pp 余量"，而那条链路（29/31 行）其实已经被护栏拒过一次。
+    拒绝不 charge 是对的，漏的是**拒绝本身**没被记下来。
+    """
+
+    def test_refusal_is_not_charged_into_usage(self):
+        b = ContextBudget()
+        b.charge(rows(9))
+        draw = rows(99, tag="huge")
+        refusal = b.would_exceed(draw)
+        assert refusal is not None
+        b.note_refusal(draw, refusal)
+        assert b.db_rows == 9, "被拒的取证不能进用量，否则红线自己把自己撑爆"
+
+    def test_attempt_level_is_recorded_and_may_exceed_the_limit(self):
+        b = ContextBudget()
+        b.charge(rows(9))
+        draw = rows(99, tag="huge")
+        b.note_refusal(draw, b.would_exceed(draw))
+        r = b.report()
+        assert r["refusals"] == 1
+        # 已计费的覆盖率停在阈值以下，试图水位越过阈值 —— 这才是该被看见的那个数
+        assert r["db_rows_pct"] < 50
+        assert r["peak_attempt_db_rows_pct"] > 50
+
+    def test_attempt_takes_the_higher_of_both_gauges(self):
+        """覆盖档与取回档共用同一个阈值和单位，报较高的那个才是"想压到哪"。"""
+        b = ContextBudget()
+        b.charge(rows(9))
+        b.charge(rows(9))                       # 同一批行重复取回：覆盖 9，取回 18
+        draw = rows(9, tag="new")
+        b.note_refusal(draw, "重复取回触发")
+        # 覆盖档试图到 18 行、取回档试图到 27 行 —— 取回档才是这次想压到的高度
+        assert b.report()["peak_attempt_db_rows_pct"] == pytest.approx(round(27 / 62 * 100, 1))
+
+    def test_no_refusal_reports_none_not_zero(self):
+        """没被拦过时报 None：0% 会在界面上画出一条"试图压到 0%"的线。"""
+        r = ContextBudget().report()
+        assert r["refusals"] == 0
+        assert r["peak_attempt_db_rows_pct"] is None
+        assert r["peak_attempt_doc_chars_pct"] is None

@@ -23,7 +23,7 @@ from fastapi import APIRouter, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent import evalview, grounding, tracestore
+from agent import evalview, grounding, replay, tracestore
 from agent.composer import compose, stamp_served
 from agent.loop import AgentRunFailed, run_agent
 
@@ -58,7 +58,10 @@ def online_quality(response: Response) -> dict:
     否则挑好的用例会把线上成功率抬上去，指标就不再指示线上的真实状况。
     """
     response.headers["Cache-Control"] = "no-store"
+    # 离线回放模式下问答走的是 eval 产物，不进链路留存 —— 这一档会停在旧数据上，
+    # 不说出来就成了"看着一切正常"。回放是演示预案，但指标页必须自己承认。
     return {"stats": tracestore.stats(source="online"),
+            "replay_mode": replay.enabled(),
             "items": tracestore.listing(source="online")}
 
 
