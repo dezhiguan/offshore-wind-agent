@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from agent.composer import detect_sources  # noqa: E402
 from eval.verdict import SUITES, check  # noqa: E402
 from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO  # noqa: E402
 
@@ -151,6 +152,10 @@ def load() -> dict[str, Any]:
         result = blob.get("result", {})
         # 断言以用例文件为准，产物里那份可能过期
         spec = specs.get(cid, stored_case)
+        # 数据源与断言同理，以证据为准而不是以产物里那份为准：口径改过之后
+        # （规则判定引用的规程曾经整条不计），旧产物存下来的是按老口径算的结果，
+        # 照搬会让页面上的红绿取决于这条用例是哪天跑的。
+        result = dict(result, sources=detect_sources(result.get("evidence") or {}))
         ok, problems = check(spec, result)
         meta = result.get("meta", {}) or {}
         budget = meta.get("budget") or {}

@@ -281,8 +281,10 @@ function render(d) {
     `<details><summary><b>规程判定</b> · ${esc(r.rule)} · ${esc((r.result?.clauses || []).map(c => '第 ' + c + ' 条').join('、'))}</summary>
      <div class="body"><p style="font-size:13.5px;margin:0 0 8px">${md(r.result?.verdict)}</p>
      <pre>${esc(JSON.stringify(r.result?.facts, null, 1))}</pre></div></details>`));
+  // 规程条款是规则判定带出来的，不是模型自己翻的——标出来，免得被当成模型的检索结果
   (ev.docs || []).forEach(x => parts.push(
-    `<details><summary><b>文档</b> · ${esc(x.doc)} · ${esc(x.title)}</summary>
+    `<details><summary><b>文档</b> · ${esc(x.doc)} · ${esc(x.title)}${
+       x.via === 'check_rule' ? ' · 规程判定引用' : ''}</summary>
      <div class="body"><div class="doctext">${esc(x.text)}</div></div></details>`));
   if (parts.length) P.push(`<div class="card"><h3>原始依据</h3>${parts.join('')}</div>`);
 

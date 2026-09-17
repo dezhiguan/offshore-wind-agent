@@ -18,6 +18,7 @@ LLM 只负责引用结论。
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -44,6 +45,21 @@ class RuleInputError(ValueError):
     pass
 
 
+# 规则引擎自己查库、自己读手册、自己把规程条款代码化，这三件事都不经过模型的工具调用。
+# 「使用的数据源」如果只统计模型点过什么，就会漏掉结论真正的出处 —— T05 的不合规
+# 判定完全来自规程第 2.1 / 2.4 条，面板上却连规程都不显示。这里把每次规则执行实际
+# 触达的数据源记下来，随结果一起交出去。
+_TOUCHED: ContextVar[set[str] | None] = ContextVar("rule_sources", default=None)
+
+_TABLES = ("alarm_records", "maintenance_records")
+
+
+def _touch(source: str) -> None:
+    touched = _TOUCHED.get()
+    if touched is not None:
+        touched.add(source)
+
+
 def _lit(value: str, pattern: re.Pattern, name: str) -> str:
     """校验后再拼进 SQL。
 
@@ -60,6 +76,9 @@ def _rows(sql: str) -> list[dict[str, Any]]:
     result = query_db(sql)
     if not result["ok"]:
         raise RuleInputError(result["error"])
+    for table in _TABLES:
+        if table in sql:
+            _touch(table)
     return result["rows"]
 
 
@@ -85,7 +104,11 @@ def _orders(turbine_id: str, fault_code: str) -> list[dict[str, Any]]:
 def _manual_text(fault_code: str) -> str:
     from tools.retriever import get_doc_section
     section = get_doc_section("fault_manual", fault_code)
-    return section.get("text", "") if section.get("ok") else ""
+    if not section.get("ok"):
+        return ""
+    # 安全链判定、4.1(3)、120 分钟门限是否适用都读了这一节，它是判定依据的一部分
+    _touch("fault_manual")
+    return section.get("text", "")
 
 
 # ---------------------------------------------------------------- 1 重复故障
@@ -518,6 +541,55 @@ def _attach_clause_texts(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _run_tracking_sources(fn, args: dict[str, Any]) -> dict[str, Any]:
+    """跑一条规则，并把它实际触达的数据源写进结果。
+
+    嵌套调用（priority_required 里会调 repeat_fault）共用同一个集合，
+    所以子规则查过的表也算在父结果头上 —— 依据面板要回答的是
+    「这个结论建立在什么之上」，不是「哪一层函数发的 SQL」。
+    """
+    token = _TOUCHED.set(set())
+    try:
+        result = fn(**args)
+        touched = set(_TOUCHED.get() or ())
+    finally:
+        _TOUCHED.reset(token)
+
+    # 引用了条款，规程就是本次结论的数据源之一 —— 哪怕模型一次 get_doc_section 都没调。
+    # 反过来，没有记录、没得判（clauses 为空）时不能顺手把规程也记上。
+    if result.get("clauses"):
+        touched.add("safety_regulation")
+    if touched:
+        result["sources"] = sorted(touched)
+    return result
+
+
+def clause_sections(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """本次判定引用到的规程条款原文，供证据留存。
+
+    原文早就随 clause_texts 给了模型，但只到模型为止：界面上的「原始依据」与
+    「使用的数据源」都只认 evidence.docs，于是规程成了唯一一份"参与了判定、
+    却在依据里看不到"的资料。这里把它补齐，条款号与原文同源，不是贴个标签。
+    """
+    from tools.retriever import get_doc_section
+
+    sections = []
+    for clause in result.get("clauses") or []:
+        section = get_doc_section("safety_regulation", clause)
+        if not section.get("ok"):
+            continue
+        sections.append({
+            "doc": section.get("doc"),
+            "section_id": section.get("section_id"),
+            "title": section.get("title"),
+            "path": section.get("path"),
+            "text": section.get("text"),
+            # 标明这一节不是模型自己取的，是规则判定带出来的
+            "via": "check_rule",
+        })
+    return sections
+
+
 def check_rule(rule: str, **kwargs) -> dict[str, Any]:
     fn = RULES.get(rule)
     if fn is None:
@@ -530,7 +602,7 @@ def check_rule(rule: str, **kwargs) -> dict[str, Any]:
                 "error": "规则 %s 缺少必填参数：%s。请先查出这些值再调用本规则。"
                          % (rule, "、".join(missing))}
     try:
-        return _attach_clause_texts(fn(**args))
+        return _attach_clause_texts(_run_tracking_sources(fn, args))
     except RuleInputError as exc:
         return {"ok": False, "error": str(exc)}
     except TypeError as exc:

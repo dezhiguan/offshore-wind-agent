@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from agent.composer import SOURCE_LABELS
+
 SUITES = {
     "cases": "回归",
     "probes": "探针",
@@ -29,9 +31,27 @@ def said(result: dict[str, Any]) -> str:
     ])
 
 
+def _sources(case: dict[str, Any], result: dict[str, Any]) -> list[str]:
+    """用例声明的数据源必须真出现在结果里。
+
+    这个字段原先只是注释：写了 safety_regulation，实际漏报了也全绿。
+    于是「结论引了规程第 2.1 条、数据源不列规程」这种漂移连着四条用例都没被拦下。
+    只判"声明了却没出现"——多出来的不判：模型多查一节手册不算错，
+    把它算成失败只会逼着用例去追模型的每一次自由发挥。
+    """
+    got = result.get("sources") or []
+    missing = []
+    for key in case.get("sources") or []:
+        label = SOURCE_LABELS.get(key, key)
+        # 规程 chip 带条款号后缀（「…规程（第 2.1、2.4 条）」），只能前缀匹配
+        if not any(str(s).startswith(label) for s in got):
+            missing.append("数据源未列出 %s" % label)
+    return missing
+
+
 def check(case: dict[str, Any], result: dict[str, Any]) -> tuple[bool, list[str]]:
     text = said(result)
-    problems: list[str] = []
+    problems: list[str] = _sources(case, result)
     spec = case.get("assert", {}) or {}
     for token in spec.get("must_include", []):
         if token not in text:
