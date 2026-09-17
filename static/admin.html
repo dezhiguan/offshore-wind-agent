@@ -292,10 +292,30 @@ td.id{font-family:var(--mono);font-weight:600;color:var(--muted)}
 /* 回答单开一页看：追踪页要的是「哪一步出了问题」，正文夹在中间会把 span 顶到屏幕外 */
 .dt .qline{display:flex;align-items:flex-start;gap:14px}
 .dt .qline h3{flex:1 1 auto;min-width:0}
-a.viewbtn{flex:0 0 auto;font-size:12.5px;font-weight:500;padding:7px 14px;border-radius:7px;
-  background:var(--surface);color:var(--ink-2);border:1px solid var(--line-2);
-  text-decoration:none;white-space:nowrap;transition:background .12s,border-color .12s,color .12s}
-a.viewbtn:hover{background:var(--surface-2);border-color:var(--accent);color:var(--accent)}
+button.viewbtn{flex:0 0 auto;font:inherit;font-size:12.5px;cursor:pointer;padding:6px 13px;
+  border:0;border-radius:7px;background:var(--surface-2);color:var(--ink-2);white-space:nowrap;
+  transition:background .12s,color .12s}
+button.viewbtn:hover{background:var(--accent-soft);color:var(--accent)}
+
+/* 回答弹层：留在当前页面看。跳去新标签会把「在看哪一条、卡在哪一步」的上下文丢掉，
+   而看完回答十有八九要回来接着看 span。用原生 dialog：ESC 关闭与焦点管理都是白送的。 */
+dialog.ansdlg{border:0;padding:0;border-radius:12px;background:var(--surface);color:var(--ink);
+  width:min(760px,calc(100vw - 48px));max-height:calc(100vh - 80px);overflow:hidden;
+  box-shadow:0 18px 50px rgba(6,16,19,.28)}
+dialog.ansdlg::backdrop{background:rgba(10,20,23,.42)}
+.ansdlg .top2{display:flex;align-items:flex-start;gap:14px;padding:20px 24px 15px;
+  border-bottom:1px solid var(--line)}
+.ansdlg .top2 h3{margin:0;font-size:1.06rem;line-height:1.5;overflow-wrap:anywhere}
+.ansdlg .top2 .ids{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:6px;
+  overflow-wrap:anywhere}
+.ansdlg .x{font:inherit;font-size:17px;line-height:1;cursor:pointer;border:0;background:transparent;
+  color:var(--muted);padding:5px 8px;border-radius:7px;flex:0 0 auto}
+.ansdlg .x:hover{background:var(--surface-2);color:var(--ink)}
+.ansdlg .cont{padding:18px 24px 24px;overflow-y:auto;max-height:calc(100vh - 210px)}
+.ansdlg .cont h4{font-size:9.5px;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;
+  color:var(--muted);margin:0 0 9px;font-weight:600}
+.ansdlg .cont .ans{max-height:none;font-size:13px;line-height:1.85}
+.ansdlg .cont .un{background:var(--warn-soft);border-color:transparent}
 .anom{background:var(--warn-soft);border-top:1px solid var(--line);border-bottom:1px solid var(--line);
   padding:10px 20px;margin:0}
 .anom .t{font-size:11.5px;font-weight:600;color:var(--warn);margin-bottom:5px}
@@ -423,6 +443,8 @@ tr.sdet>td{background:var(--sunken);padding:12px 14px}
 </div>
 
 </div>
+
+<dialog class="ansdlg" id="ansdlg"></dialog>
 <script>
 const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const clip = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n) + '…' : s; };
@@ -848,7 +870,41 @@ async function openTrace(id, cell) {
   }
   cell.parentElement.classList.add('open');
 }
-let TRACES = [], CURRENT = null, TRACE_CAP = 50;
+let TRACES = [], CURRENT = null, TRACE_CAP = 50, ANSWER_OF = null;
+
+// 回答在弹层里看完就关，追踪页的滚动位置与选中项都还在
+function openAnswer() {
+  const d = ANSWER_OF;
+  if (!d) return;
+  const dlg = $('#ansdlg'), un = d.unverifiable || [];
+  dlg.innerHTML = `
+    <div class="top2">
+      <div style="flex:1;min-width:0">
+        <h3>${esc(d.question)}</h3>
+        <div class="ids">${esc(d.short_id || '')} · ${
+          SRC_LABEL[d.source === 'eval' ? 'eval' : 'online']} · ${esc(d.model || '')} · ${
+          esc(d.at || '')} · ${((d.elapsed_ms || 0) / 1000).toFixed(2)}s</div>
+      </div>
+      <button class="x" type="button" aria-label="关闭">✕</button>
+    </div>
+    <div class="cont">
+      <h4>回答</h4>
+      <div class="ans">${text(d.answer) || '（本次没有产出回答）'}</div>
+      ${un.length ? `<h4 style="margin-top:18px">现有资料无法确认（${un.length} 项）</h4>
+        <div class="ans un">${un.map(u => '· ' + text(u)).join('\n')}</div>` : ''}
+      ${d.sources?.length ? `<h4 style="margin-top:18px">使用的数据源</h4>
+        <div>${d.sources.map(x => `<span class="chip">${esc(x)}</span>`).join('')}</div>` : ''}
+    </div>`;
+  dlg.querySelector('.x').onclick = () => closeAnswer(true);
+  dlg.showModal();
+}
+
+// 关闭后浏览器会把焦点还给「查看结果」，且按 focus-visible 画出焦点环——
+// 用鼠标关的人没在用键盘，那圈描边只是碍眼；ESC 关的留着，那确实是键盘操作。
+function closeAnswer(byPointer) {
+  $('#ansdlg').close();
+  if (byPointer) document.activeElement?.blur?.();
+}
 // 从「线上质量」的最近问答表点过来时要定位的那一条；用完即清
 let FOCUS = null;
 
@@ -955,6 +1011,7 @@ async function selectTrace(id) {
   box.innerHTML = '<div class="dt"><p style="color:var(--muted);font-size:13px">加载中…</p></div>';
   const d = await api('/api/traces/' + id);
   if (d.error) { box.innerHTML = `<div class="dt"><p>${esc(d.error)}</p></div>`; return; }
+  ANSWER_OF = d;
   const s = d.summary || {}, b = d.budget || {};
   const steps = (d.spans || []).filter(x => ['TOOL', 'RAG', 'RULE'].includes(x.kind)).length;
   const badges = [
@@ -970,8 +1027,7 @@ async function selectTrace(id) {
     <div class="dt">
       <div class="qline"><h3>${esc(d.question)}</h3>${
         (d.answer || d.unverifiable?.length)
-          ? `<a class="viewbtn" href="/admin/answer?trace=${d.id}" target="_blank"
-               rel="noopener">查看结果 ↗</a>` : ''}</div>
+          ? '<button class="viewbtn" type="button" onclick="openAnswer()">查看结果</button>' : ''}</div>
       <div class="ids">${esc(d.short_id || '')} · ${
         SRC_LABEL[d.source === 'eval' ? 'eval' : 'online']} · ${esc(d.model || '')} · ${esc(d.at || '')}
         · 上下文 ${(b.db_rows_pct ?? 0).toFixed(1)}% 行 / ${(b.doc_chars_pct ?? 0).toFixed(1)}% 文档</div>
@@ -1178,6 +1234,9 @@ function wireRun() {
     run(ids);
   };
 }
+
+// 点半透明背景也关掉：dialog 元素本身就是那块背景的命中区域
+$('#ansdlg').addEventListener('click', e => { if (e.target === $('#ansdlg')) closeAnswer(true); });
 
 wireRun();
 show((location.hash || '#eval').slice(1));
