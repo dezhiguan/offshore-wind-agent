@@ -30,6 +30,9 @@ from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO  # noqa: E402
 OUT_DIR = ROOT / "eval" / "out"
 EVAL_DIR = ROOT / "eval"
 
+# 产物搭出来的链路用这个前缀作 id，与留存里的整数 id 区分开
+TRACE_PREFIX = "eval:"
+
 # 指标快照的流水账。**扩展名必须不是 .json**：load() 用 glob("*.json") 扫产物，
 # 叫 _history.json 会被当成一条用例产物解析。
 HISTORY = OUT_DIR / "_history.jsonl"
@@ -69,13 +72,84 @@ def judge(case: dict[str, Any], result: dict[str, Any]) -> tuple[bool, list[str]
     return check(case, result)
 
 
-def persist(case: dict[str, Any], result: dict[str, Any]) -> None:
-    """把本次结果落盘，与 eval/run.py 的产物格式一致，便于页面刷新后仍可见。"""
+def persist(case: dict[str, Any], result: dict[str, Any],
+            trace_id: int | None = None) -> None:
+    """把本次结果落盘，与 eval/run.py 的产物格式一致，便于页面刷新后仍可见。
+
+    trace_id 记的是这次跑测在链路留存里的编号。离线评测那张表点一行要跳到
+    链路追踪，有它就能直接定位到**同一次运行**那条活链路；没有（命令行跑的、
+    或已被挤出留存）才回退到用产物现搭一条，见 trace_records()。
+    """
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     payload = {"case": {k: v for k, v in case.items() if not k.startswith("_")},
-               "suite": case.get("_suite"), "result": result}
+               "suite": case.get("_suite"), "trace_id": trace_id, "result": result}
     (OUT_DIR / ("%s.json" % case["id"])).write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _trace_record(item: dict[str, Any]) -> dict[str, Any]:
+    """把一条 load() 出来的用例摊成链路记录的形状。
+
+    字段名与 tracestore 保持一致，追踪页那套渲染才用得上——那边已经能画
+    pipeline、span 表、护栏徽标，这里再抄一份只会两处走样。
+    """
+    from agent.tracestore import _diagnose
+
+    spans = item.get("spans") or []
+    status, notes = _diagnose(spans, {"stop_reason": item.get("stop_reason"),
+                                      "steps": item.get("steps")})
+    answer = item.get("answer") or ""
+    return {
+        "id": TRACE_PREFIX + item["id"],
+        # 短 id 直接用用例编号：这批链路本来就是按用例编号找的，
+        # 给个随机十六进制串反而要多认一层
+        "short_id": item["id"],
+        "at": datetime.fromtimestamp(item["at_ts"]).strftime("%m-%d %H:%M:%S"),
+        "at_ts": item["at_ts"],
+        "status": status,
+        "notes": notes,
+        "question": item.get("question") or "",
+        "source": "eval",
+        "replay": False,
+        "from_artifact": True,
+        "case_id": item["id"],
+        # 同一次运行如果还留在内存里，追踪页该用留存那条（更全），这里只负责
+        # 把编号带出去供去重，见 admin._merged_traces
+        "trace_id_in_store": item.get("trace_id"),
+        "model": item.get("model"),
+        "elapsed_ms": item.get("elapsed_ms"),
+        "stop_reason": item.get("stop_reason"),
+        "steps": item.get("steps"),
+        "served_ms": None,
+        "price_basis": {},
+        "grounding": {"mode": item.get("grounding")} if item.get("grounding") else {},
+        "format_parsed": None,
+        "budget": {"db_rows_pct": item.get("db_rows_pct"),
+                   "doc_chars_pct": item.get("doc_chars_pct")},
+        "sources": item.get("sources") or [],
+        "answer": answer,
+        "unverifiable": item.get("unverifiable") or [],
+        "spans": spans,
+        "summary": {"tool_calls": item.get("tool_calls"),
+                    "tool_failures": item.get("tool_failures"),
+                    "tool_refused": item.get("tool_refused"),
+                    "model_calls": item.get("model_calls"),
+                    "cost_cny": item.get("cost_cny"),
+                    "cached_tokens": item.get("cached_tokens")},
+    }
+
+
+def trace_records() -> dict[str, dict[str, Any]]:
+    """把 eval 产物整批转成链路记录，按 id 索引。
+
+    链路留存是**进程内**的：命令行 `python eval/run.py` 跑出的产物根本没有对应
+    链路，后台「运行全部」跑出来的也会被后续记录挤出（上限 50 条），一重启更是
+    全没。而离线评测那张表点一行就要跳到链路追踪定位到该条 —— 指不着就等于
+    这个跳转在最常见的情形下是坏的。
+
+    产物里本来就存着 spans / meta / trace_summary，缺的只是一层形状转换。
+    """
+    return {r["id"]: r for r in (_trace_record(it) for it in load()["items"])}
 
 
 def snapshot(ran: int | None = None) -> dict[str, Any]:
@@ -162,6 +236,10 @@ def load() -> dict[str, Any]:
         ts = result.get("trace_summary") or {}
         items.append({
             "id": cid,
+            # 点这一行要跳到链路追踪。优先指向同一次运行留在内存里的那条；
+            # 留存是进程内的，指不着时用 eval:<id> 让追踪页拿产物现搭一条。
+            "trace_id": blob.get("trace_id"),
+            "trace_ref": TRACE_PREFIX + cid,
             "suite": _suite_of(cid, blob.get("suite") or spec.get("_suite")),
             "question": spec.get("question") or stored_case.get("question", ""),
             "probe": spec.get("probe"),

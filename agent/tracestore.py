@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import statistics
 import threading
+import time
 import uuid
 from datetime import datetime
 from collections import deque
@@ -61,7 +62,7 @@ def _diagnose(spans: list[dict[str, Any]], meta: dict[str, Any]) -> tuple[str, l
 
 
 def record(question: str, result: dict[str, Any], *, source: str = "online",
-           replay: bool = False, error: str | None = None) -> None:
+           replay: bool = False, error: str | None = None) -> int | None:
     """留存一条链路。error 非空表示这次运行是失败收场（模型超时、网关报错等）。
 
     失败也要进来：后台的成功率如果只统计跑通的链路，分母里就没有失败，
@@ -75,7 +76,7 @@ def record(question: str, result: dict[str, Any], *, source: str = "online",
     global _seq
     spans = result.get("spans") or []
     if not spans and not replay and not error:
-        return
+        return None
     ts = result.get("trace_summary") or {}
     meta = result.get("meta") or {}
     status, notes = _diagnose(spans, meta)
@@ -91,6 +92,9 @@ def record(question: str, result: dict[str, Any], *, source: str = "online",
             # 短 id 仅用于展示与检索，不参与任何逻辑
             "short_id": uuid.uuid4().hex[:12],
             "at": datetime.now().strftime("%m-%d %H:%M:%S"),
+            # 排序用的数值时间。离线评测的产物要和留存的链路并进同一个列表，
+            # "%m-%d %H:%M:%S" 这种展示串跨年就排不对，比较也慢。
+            "at_ts": time.time(),
             "status": status,
             "notes": notes,
             "question": question,
@@ -115,6 +119,7 @@ def record(question: str, result: dict[str, Any], *, source: str = "online",
             "spans": spans,
             "summary": ts,
         })
+        return _seq
 
 
 def _pick(source: str | None) -> list[dict[str, Any]]:
