@@ -157,13 +157,19 @@ def repeat_fault(turbine_id: str, fault_code: str,
             facts["窗口外未计入的告警"] = outside
 
     is_repeat = best_count >= REPEAT_THRESHOLD
-    verdict = (
-        "构成重复故障：最大连续 24 小时窗口内发生 %d 次，达到第 3.1 条的 3 次门限。" % best_count
-        if is_repeat else
-        "不构成重复故障：最大连续 24 小时窗口内仅发生 %d 次，未达到第 3.1 条的 3 次门限。" % best_count
-    )
+    # 一条记录都没有，和「有记录但没到 3 次」是两回事，结论同为「不构成」但成因不同。
+    # 只说「仅发生 0 次」的话，模型会把它读成「不构成重复故障而已」——实测就是这么读的，
+    # 它照着这个 0 接着往下答，没有一个字提到这台风机压根没有这条故障。
+    if not alarms:
+        verdict = ("数据库中没有 %s / %s 的告警记录，无从按第 3.1 条统计次数，"
+                   "因此不构成重复故障。" % (turbine_id, fault_code))
+    elif is_repeat:
+        verdict = "构成重复故障：最大连续 24 小时窗口内发生 %d 次，达到第 3.1 条的 3 次门限。" % best_count
+    else:
+        verdict = "不构成重复故障：最大连续 24 小时窗口内仅发生 %d 次，未达到第 3.1 条的 3 次门限。" % best_count
     return {
         "ok": True, "rule": "repeat_fault", "is_repeat_fault": is_repeat,
+        "no_records": not alarms,
         "verdict": verdict, "facts": facts, "unverifiable": [],
         "clauses": ["3.1"] + (["3.2", "3.3"] if is_repeat else []),
     }
@@ -288,9 +294,38 @@ def work_order_assessment(turbine_id: str, fault_code: str) -> dict[str, Any]:
 
 # ---------------------------------------------------------------- 4 禁止远程复位
 
-_BAN_DEENERGIZE = ("断电", "停电", "隔离", "母线电压")
-_BAN_REPLACE_BOARD = ("更换控制单板", "更换接口板", "更换通讯模块", "更换相应部件", "DSP控制单板")
+# 第 4.1(3) 款「故障手册明确要求**断电检查或更换单板**」是两条腿，得分开判。
+#
+# 原先两条腿都退化成了整节的裸词命中，其中 _BAN_DEENERGIZE 收了「隔离」：
+# 24014 冷却风扇那节写「更换前执行停机、隔离、挂牌上锁和验电」——讲的是换风扇的
+# 作业前置，跟「要求断电检查」「要求更换单板」都不沾边，却照样判成立，于是给风扇
+# 故障扣上了单板条款的帽子。结论也许还站得住，引的条款是错的，现场一追问就露馅。
+#
+# 顺带查出来一件更要紧的事：_BAN_REPLACE_BOARD 里的 "DSP控制单板" 从来没匹配上过，
+# 因为手册原文是「更换 DSP 控制单板」带空格。24010 这个真该命中的故障码，一直是靠
+# 上面那个「隔离」的误命中兜着的——两个 bug 抵消成了对的答案。所以先去空白再匹配。
+#
+# 改判据：按句判，且要求两个词在同一句里共现。整节命中管不住——一节里既有「检查
+# 线缆」又有别处的「隔离」，裸词命中就成立了，而这两件事根本不在一句话里。
+_DEENERGIZE = ("断电", "停电", "隔离", "母线")
+_INSPECT = ("检查", "检测", "核对", "排查", "测量")
+_BOARD_PARTS = ("控制单板", "接口板", "通讯模块", "单板")
 _BAN_POWER_CIRCUIT = ("母线电压", "功率回路")
+_SENT_SPLIT = re.compile(r"[。；\n]")
+
+
+def _manual_requires_deenergize_or_board(manual: str) -> tuple[str | None, str | None]:
+    """第 4.1(3) 款逐句判。返回（命中的那条腿, 手册原句）。
+
+    把原句带出来，是因为条款引用必须落到手册的哪一句上——上一版只给「成立」，
+    被追问「手册哪里要求换单板了」时答不出来，也就没人能发现它判错了。
+    """
+    for sentence in _SENT_SPLIT.split(re.sub(r"\s+", "", manual)):
+        if "更换" in sentence and any(p in sentence for p in _BOARD_PARTS):
+            return "故障手册要求更换单板 / 通讯模块", sentence
+        if any(d in sentence for d in _DEENERGIZE) and any(i in sentence for i in _INSPECT):
+            return "故障手册要求断电检查", sentence
+    return None, None
 
 
 def remote_reset_ban(turbine_id: str, fault_code: str) -> dict[str, Any]:
@@ -299,6 +334,20 @@ def remote_reset_ban(turbine_id: str, fault_code: str) -> dict[str, Any]:
     fault_code = _lit(fault_code, _RE_CODE, "故障代码")
 
     alarms = _alarms(turbine_id, fault_code)
+    # 没有告警记录就没有判定对象。第 4.1 条五款里有三款读的是手册，而手册只按故障码
+    # 分节、与哪台风机无关——不挡住空集的话，问「T09 的 24005 能不能复位」会拿 24005
+    # 那一节判出「禁止复位，命中第 4.1(1)(3)(5) 款」，而 T09 压根没有这条告警。
+    # 模型拿到的是一份带条款号、带逐款核对表的确定性结论，不会去怀疑前提。
+    # priority_required / work_order_assessment 早就这么挡了，这里是漏的。
+    if not alarms:
+        return {"ok": True, "rule": "remote_reset_ban", "reset_banned": None,
+                "verdict": "数据库中没有 %s / %s 的告警记录，无法判定是否禁止远程复位。"
+                           "手册按故障代码分节、与具体风机无关，不能据此对这台风机下结论。"
+                           % (turbine_id, fault_code),
+                "facts": {"查询条件": {"turbine_id": turbine_id, "fault_code": fault_code},
+                          "告警条数": 0},
+                "unverifiable": [], "clauses": []}
+
     manual = _manual_text(fault_code)
     repeat = repeat_fault(turbine_id, fault_code)
 
@@ -315,10 +364,14 @@ def remote_reset_ban(turbine_id: str, fault_code: str) -> dict[str, Any]:
     if c2:
         hits.append("同一风机同一故障代码在连续 24 小时内发生 %d 次" % repeat["facts"]["最大连续24小时窗口内次数"])
 
-    c3 = any(k in manual for k in _BAN_REPLACE_BOARD) or any(k in manual for k in _BAN_DEENERGIZE)
-    checks.append({"款": "4.1(3) 手册要求断电检查或更换单板", "结论": "成立" if c3 else "不成立"})
+    c3_leg, c3_sentence = _manual_requires_deenergize_or_board(manual)
+    c3 = c3_leg is not None
+    checks.append({"款": "4.1(3) 手册要求断电检查或更换单板",
+                   "结论": "成立" if c3 else "不成立",
+                   "依据": ("手册原句：%s" % c3_sentence) if c3 else
+                           "手册本节既未要求断电检查，也未要求更换单板 / 模块"})
     if c3:
-        hits.append("故障手册要求断电检查或更换单板/模块")
+        hits.append(c3_leg)
 
     # 4.1(4) 设备安全状态——数据库不记录，按第 1.2/1.3 条标为无法确认而非自动成立
     checks.append({"款": "4.1(4) 无法确认设备安全状态", "结论": "资料无法确认",

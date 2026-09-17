@@ -35,6 +35,22 @@ class TestRepeatFault:
                          window_start="2026-07-18 08:15:00", window_end="2026-07-18 19:05:00")
         assert r["facts"]["指定窗口"]["次数"] == 3
 
+    def test_no_records_is_not_the_same_as_below_threshold(self):
+        """T01 没有 24002。结论同为「不构成」，但成因必须分得开。
+
+        只说「仅发生 0 次」时，模型会读成「不构成重复故障而已」，接着拿这个 0
+        往下答，全程不提这台风机压根没有这条故障。
+        """
+        r = repeat_fault("T01", "24002")
+        assert r["is_repeat_fault"] is False
+        assert r["no_records"] is True
+        assert "没有" in r["verdict"] and "记录" in r["verdict"]
+
+    def test_existing_records_below_threshold_not_flagged_as_missing(self):
+        """反向：T07/24012 有 2 条记录，不能被误标成「无记录」。"""
+        r = repeat_fault("T07", "24012")
+        assert r["no_records"] is False
+
 
 class TestPriorityRequired:
     def test_safety_chain_requires_emergency(self):
@@ -91,6 +107,48 @@ class TestRemoteResetBan:
         r = check_rule("remote_reset_ban", turbine_id="T03", fault_code="24002")
         rows = [c for c in r["facts"]["逐款核对"] if "4.1(4)" in c["款"]]
         assert rows and rows[0]["结论"] == "资料无法确认"
+
+    def test_no_alarm_refuses_to_judge(self):
+        """T09 没有 24005。五款里有三款读的是手册，而手册按故障代码分节、与风机无关。
+
+        不挡空集的话，问「T09 的 24005 能不能复位」会拿 24005 那一节判出
+        「禁止复位，命中第 4.1(1)(3)(5) 款」——一份带条款号和逐款核对表的
+        确定性结论，模型不会去怀疑它的前提。
+        """
+        r = check_rule("remote_reset_ban", turbine_id="T09", fault_code="24005")
+        assert r["reset_banned"] is None
+        assert "没有" in r["verdict"] and "记录" in r["verdict"]
+        assert r["facts"]["告警条数"] == 0
+        assert r["clauses"] == []
+
+    def test_fan_fault_does_not_hit_board_clause(self):
+        """T06/24014 是冷却风扇故障，手册要换的是风扇，不是单板。
+
+        上一版把「隔离」当第 4.1(3) 款的命中词，而 24014 那节写的是
+        「更换前执行停机、隔离、挂牌上锁和验电」——讲的是换风扇的作业前置。
+        """
+        r = check_rule("remote_reset_ban", turbine_id="T06", fault_code="24014")
+        row = [c for c in r["facts"]["逐款核对"] if "4.1(3)" in c["款"]][0]
+        assert row["结论"] == "不成立"
+        assert r["reset_banned"] is False
+
+    def test_board_clause_survives_whitespace_in_manual(self):
+        """T08/24010 手册原文是「更换 DSP 控制单板」——带空格。
+
+        老词表写死 "DSP控制单板"，从来没匹配上过；这个该命中的故障码一直是靠
+        「隔离」的误命中兜着的，两个 bug 抵消成了对的答案。去空白后才是真命中。
+        """
+        r = check_rule("remote_reset_ban", turbine_id="T08", fault_code="24010")
+        row = [c for c in r["facts"]["逐款核对"] if "4.1(3)" in c["款"]][0]
+        assert row["结论"] == "成立"
+        assert "控制单板" in row["依据"]
+
+    def test_deenergize_clause_needs_same_sentence(self):
+        """第 4.1(3) 的另一条腿：断电与检查要在同一句里，整节裸词命中管不住。"""
+        r = check_rule("remote_reset_ban", turbine_id="T05", fault_code="24005")
+        row = [c for c in r["facts"]["逐款核对"] if "4.1(3)" in c["款"]][0]
+        assert row["结论"] == "成立"
+        assert "断电" in row["依据"] and "检查" in row["依据"]
 
 
 class TestCloseCompliance:
