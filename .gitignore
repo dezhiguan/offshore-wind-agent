@@ -11,6 +11,10 @@ data/
 # 跑测产物（同时是离线回放素材，本地生成）
 eval/out/
 
+# IDE
+.idea/
+.vscode/
+
 # Python
 .venv/
 __pycache__/
