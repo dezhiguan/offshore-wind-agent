@@ -1103,40 +1103,25 @@ function resetList() {
   if (list) list.scrollTop = 0;
 }
 
-/** 把某一条滚进左列表的视野。
+/** 把某一条滚进视野。
  *
- *  不用 scrollIntoView：block:'nearest' 只保证"露出来"，从离线评测跳过来的那条
- *  会贴死在视口最下沿，看着像没滚到。
+ *  两层滚动都得动：#tlist 自己会滚，但它的框（实测 620px）通常比可用视口还高，
+ *  窗口矮的时候框底那一截结构上就在页面折线以下 —— 只滚框内的话，列表已经到底了
+ *  行却还在视口外，看着就是"没定位到"。scrollIntoView 会把每一层祖先都滚到，
+ *  正好覆盖这两层。
  *
- *  两段滚动缺一不可。列表框自己会滚，但它通常比窗口还高（窗口矮一点时整个列表
- *  都在折线以下），只滚列表框的话，行在框里居中了、却仍落在页面折线以外——
- *  跳过来还是找不到人。所以先把面板顶到视口上沿腾出最大可见高度，再在
- *  「列表框 ∩ 视口」这段里居中。
+ *  必须是 block:'center' 不能是 'nearest'：后者只做最小位移，跳过来的那条会贴死
+ *  在视口最下沿，跟没滚一样。
  *
- *  已经看得见就一步都不走：在列表里挨条点着看时，每点一下都重新居中会让整列
- *  跟着跳，而点的人本来就看着它。
+ *  已经完整看得见（框内 + 视口内）就一步都不走：在列表里挨条点着看时，每点一下
+ *  都重新居中会让整列跟着跳，而点的人本来就看着它。
  */
 function revealInList(el) {
-  const list = $('#tlist');
-  if (!list || !el) return;
-  const seen = () => {
-    const r = el.getBoundingClientRect(), lr = list.getBoundingClientRect();
-    return r.top >= Math.max(lr.top, 0) && r.bottom <= Math.min(lr.bottom, innerHeight);
-  };
-  if (seen()) return;
-
-  // ① 面板顶到视口上沿（留 8px），可见高度最大化
-  const panel = list.closest('.panel') || list;
-  const top = panel.getBoundingClientRect().top;
-  if (top < 0 || top > innerHeight * 0.4) window.scrollBy(0, top - 8);
-
-  // ② 在列表框露出来的那一段里居中
-  const lr = list.getBoundingClientRect();
-  const lo = Math.max(lr.top, 0), hi = Math.min(lr.bottom, innerHeight);
-  const r = el.getBoundingClientRect();
-  const delta = (r.top - lo) - (hi - lo - r.height) / 2;
-  list.scrollTop = Math.max(0, Math.min(list.scrollTop + delta,
-                                        list.scrollHeight - list.clientHeight));
+  if (!el) return;
+  const list = $('#tlist'), r = el.getBoundingClientRect(), lr = list?.getBoundingClientRect();
+  if (r.top >= 0 && r.bottom <= innerHeight &&
+      lr && r.top >= lr.top && r.bottom <= lr.bottom) return;
+  el.scrollIntoView({block: 'center'});
 }
 
 async function selectTrace(id) {
@@ -1208,6 +1193,10 @@ async function selectTrace(id) {
         color:var(--muted);margin:14px 0 10px;font-weight:600">Span 明细</h4>
       ${spanTable(d.spans || [])}
     </div>`;
+  // 详情渲染完页面高度会变（占位只有一行、实际详情很长），浏览器的滚动锚定会把
+  // 刚定好的位置挪走 —— 实测选中行会被挤到视口外 110% 处。等这一帧布局落定再校
+  // 一次；已经看得见时 revealInList 一步都不走，所以不会来回抖。
+  requestAnimationFrame(() => revealInList($(`#tlist .ti[data-id="${id}"]`)));
 }
 
 /** 成本那一格的小字。价目表外的模型会落到兜底价，那是估算不是账单，必须说出来。 */
