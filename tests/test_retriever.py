@@ -75,11 +75,48 @@ class TestDocFilter:
 
 
 class TestOutputShape:
-    def test_search_returns_snippet_not_full_text(self):
-        """检索只回摘要，全文要显式 get_doc_section——防止上下文被撑爆。"""
-        hit = search_docs("24002")["hits"][0]
-        assert "text" not in hit
-        assert len(hit["snippet"]) <= 161
+    def test_search_returns_snippet_by_default(self):
+        """命中有悬念时只回摘要，全文要显式 get_doc_section——防止上下文被撑爆。"""
+        result = search_docs("变流器 温度 偏高 处理")
+        assert result["inlined"] is None
+        assert all("text" not in h for h in result["hits"])
+        assert all(len(h["snippet"]) <= 161 for h in result["hits"])
+
+
+class TestInlineFullText:
+    """命中无悬念时 top-1 直接带回全文（2026-09-18 加），省掉一次 get_doc_section 往返。
+
+    注入的是**一节**原文，与 get_doc_section 放进去的是同一段；红线针对的是
+    "整份文档"，而手册只有 9 节 —— 所以只带 top-1，绝不给 top_k 全部带全文。
+    """
+
+    def test_exact_fault_code_inlines_top_hit(self):
+        result = search_docs("24002 变流器心跳 常见原因")
+        assert result["inlined"]["section_id"] == "24002_SC_变流器心跳"
+        assert result["hits"][0]["text"].startswith("###")
+
+    def test_exact_clause_number_inlines_top_hit(self):
+        assert search_docs("第 4.1 条 禁止远程复位")["inlined"]["section_id"] == "4.1"
+
+    def test_only_the_top_hit_ever_carries_full_text(self):
+        """四节全带全文就是把大半本手册搬进上下文——那正是红线要拦的事。"""
+        result = search_docs("24002 变流器心跳 常见原因")
+        assert all("text" not in h for h in result["hits"][1:])
+
+    def test_low_confidence_recall_never_inlines(self):
+        """召回本身不可信时推全文，等于把一次漏召回放大成一整段像模像样的原文。"""
+        result = search_docs("弄完之后要盯多久才算数")
+        assert result["recall_check"]["status"] == "low_confidence"
+        assert result["inlined"] is None
+
+    def test_inlined_text_is_metered_as_full_section(self):
+        """按摘要计量会凭空漏掉一节的量，而漏计的正是护栏要拦的那一侧。"""
+        from tools.budget import measure
+
+        result = search_docs("24002 变流器心跳 常见原因")
+        full = len(result["hits"][0]["text"])
+        drawn = dict(measure("search_docs", result).units)
+        assert drawn["fault_manual:24002_SC_变流器心跳"] == full
 
     def test_missing_section_returns_error_not_exception(self):
         result = get_doc_section("fault_manual", "99999")

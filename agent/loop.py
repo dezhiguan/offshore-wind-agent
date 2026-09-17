@@ -20,6 +20,7 @@ import json
 import os
 import time
 from collections.abc import Iterator
+from functools import lru_cache
 from typing import Any
 
 from openai import OpenAI
@@ -63,16 +64,31 @@ class AgentRunFailed(RuntimeError):
         self.partial = partial
 
 
+@lru_cache(maxsize=4)
+def _client_for(key: str, base_url: str, timeout: float) -> OpenAI:
+    """按配置缓存客户端，**跨问答复用同一个连接池**。
+
+    原先每轮问答新建一个 client，也就是每个问题都重做一次 TCP + TLS 握手。
+    本机实测（2026-09-18，经 VPN 出网）到 DashScope 的 RTT 为 386 ms，TLS 要
+    2~3 个往返，建连一项就吃掉约 0.8~1.2 秒 —— 而一次问答的全部工具执行加起来
+    才 0.92 秒。链路里"Agent 决策"那一段 1108 ms，大半是握手，不是模型在想。
+
+    缓存键带上配置：换了 base_url 或超时仍然拿到新客户端，改配置不必重启。
+    httpx 的连接池本身线程安全，多个请求共用一个 client 是 SDK 的推荐用法。
+    """
+    return OpenAI(api_key=key, base_url=base_url, timeout=timeout)
+
+
 def _client() -> OpenAI:
     key = os.getenv("DASHSCOPE_API_KEY")
     if not key:
         raise LlmNotConfigured(
             "未配置 DASHSCOPE_API_KEY。请复制 .env.example 为 .env 并填入密钥。"
         )
-    return OpenAI(
-        api_key=key,
-        base_url=os.getenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        timeout=TIMEOUT,
+    return _client_for(
+        key,
+        os.getenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        TIMEOUT,
     )
 
 
@@ -275,13 +291,31 @@ def _summarize(name: str, result: dict[str, Any]) -> str:
             warn = "（低置信：%s）" % "；".join(check.get("reasons") or [])
         if not hits:
             return "未命中%s" % warn
-        return "命中 %d 节：%s%s" % (
-            len(hits), "、".join(h["title"][:24] for h in hits[:3]), warn)
+        inlined = "（已带回《%s》全文）" % result["inlined"]["title"][:24] if result.get("inlined") else ""
+        return "命中 %d 节：%s%s%s" % (
+            len(hits), "、".join(h["title"][:24] for h in hits[:3]), inlined, warn)
     if name == "get_doc_section":
         return "取回《%s》%s" % (result.get("doc", ""), result.get("title", ""))
     if name == "check_rule":
         return str(result.get("verdict", ""))[:80]
     return "完成"
+
+
+def warm_up() -> None:
+    """把懒加载的几样先建好，别让它们落在第一个问题头上。
+
+    检索索引要给两份文档分词，而 jieba 的词典是首次分词时才加载的：本机实测这一下
+    要 2.4 秒。原先它落在**进程起来后的第一个提问**上——那一题白等两秒多，看上去
+    像模型慢，其实一个 token 都还没发出去。预算分母（语料总量）同理。
+
+    服务端与命令行跑测器都要调：只在服务端预热的话，跑测产物里第一条用例会多背
+    一个冷启动，而那批数字正是用来判断优化有没有效果的。
+    """
+    from tools.budget import corpus_totals
+    from tools.retriever import get_index
+
+    get_index().search("预热")
+    corpus_totals()
 
 
 def run_agent(question: str) -> dict[str, Any]:
@@ -519,7 +553,16 @@ def _add_doc(evidence, section: dict[str, Any]) -> None:
 def _collect_evidence(evidence, name, args, result) -> None:
     if not result.get("ok", True):
         return
-    if name == "query_db":
+    if name == "search_docs":
+        # 带回全文的那一节要进证据：模型不再需要 get_doc_section，
+        # 而依据、数据源与证据面板都是从 evidence 汇总出来的 ——
+        # 不收在这里，界面上就会出现"引用了手册、数据源里却没有手册"。
+        for hit in result.get("hits", []):
+            if hit.get("text"):
+                _add_doc(evidence, {"doc": hit.get("doc"), "section_id": hit.get("section_id"),
+                                    "title": hit.get("title"), "path": hit.get("path"),
+                                    "text": hit.get("text")})
+    elif name == "query_db":
         evidence["tables"].append({
             "sql": result.get("sql"),
             "columns": result.get("columns", []),

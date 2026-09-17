@@ -77,6 +77,12 @@ STOPWORDS = frozenset("""
 # 这是**告警**不是拦截 —— 只写进结果与链路，不改变返回内容，避免误伤真实答案。
 LOW_SCORE = 2.0
 
+# top-1 比 top-2 高出这个倍数，就认为"命中哪一节"已经没有悬念，可以直接带回全文，
+# 省掉模型再发一次 get_doc_section 的往返（实测一轮往返 3~5 秒）。
+# 2.5 不是拍的：实测「24002 变流器心跳 常见原因」的 top1/top2 = 13.61/4.10 = 3.3 倍，
+# 而含糊的问法（「弄完之后要盯多久」）前两名基本同分。定在 2.5 把两类分开。
+INLINE_DOMINANCE = 2.5
+
 
 @dataclass
 class Chunk:
@@ -240,6 +246,38 @@ class Index:
             "hint": "换用故障代码、条款号或规程原文用词重试" if reasons else None,
         }
 
+    def inline_target(self, query: str, hits: list[dict[str, Any]]) -> tuple[Chunk, str] | None:
+        """判断 top-1 是否确凿到可以在检索结果里直接带回全文。
+
+        **只带 top-1，且只在无悬念时带**。手册一共只有 9 节 3845 字符，top-4 里
+        最大的四节合起来就是整本的 59% —— 那不是检索，是把大半本手册搬进上下文，
+        题面红线正是冲着这个来的。而单独一节的全文，本来就是 get_doc_section
+        会放进去的同一段原文：合并掉那一轮，注入内容不增反减（少一份摘要）。
+
+        两个判据，满足其一：
+          · 精确锚点 —— 问句里写了故障码或条款号，而 top-1 正是那一节；
+          · 显著领先 —— top-1 得分是 top-2 的 INLINE_DOMINANCE 倍以上。
+        召回本身就不可信时（diagnose 报 low_confidence）一律不带：那种情况下把
+        全文推过去，等于把一次漏召回放大成一整段"看着像依据"的原文。
+        """
+        if not hits or hits[0].get("score", 0) <= LOW_SCORE:
+            return None
+        top = hits[0]
+        chunk = next((c for c in self.chunks
+                      if c.doc == top.get("doc_key") and c.section_id == top.get("section_id")),
+                     None)
+        if chunk is None:
+            return None
+        if set(_FAULT_CODE.findall(query)) & chunk.codes:
+            return chunk, "问句里的故障代码精确命中本节"
+        if chunk.clause_no and chunk.clause_no in set(_CLAUSE_NO.findall(query)):
+            return chunk, "问句里的条款号精确命中本节"
+        runner_up = hits[1]["score"] if len(hits) > 1 else 0.0
+        if runner_up <= 0 or top["score"] >= INLINE_DOMINANCE * runner_up:
+            return chunk, "得分显著领先第二名（%.1f 倍）" % (
+                top["score"] / runner_up if runner_up > 0 else float("inf"))
+        return None
+
     def get_section(self, doc: str, section_id: str) -> dict[str, Any]:
         doc_key = DOC_ALIASES.get(doc, doc)
         sid = section_id.strip()
@@ -302,14 +340,30 @@ def get_index() -> Index:
 
 
 def search_docs(query: str, doc: str | None = None, top_k: int = 4) -> dict[str, Any]:
+    """检索章节。命中无悬念时，top-1 直接带回全文，省掉一次 get_doc_section 往返。
+
+    带回的是**一节**原文，与 get_doc_section 放进上下文的是同一段；其余命中仍然
+    只给摘要。判据与边界见 Index.inline_target。
+    """
     index = get_index()
     hits = index.search(query, doc=doc, top_k=top_k)
     recall_check = index.diagnose(query, hits)
+    inlined = None
+    if recall_check["status"] == "ok":
+        target = index.inline_target(query, hits)
+        if target:
+            chunk, reason = target
+            hits = [dict(hits[0], text=chunk.text)] + hits[1:]
+            inlined = {"doc": DOC_LABELS[chunk.doc], "doc_key": chunk.doc,
+                       "section_id": chunk.section_id, "title": chunk.title,
+                       "path": chunk.path, "reason": reason}
     return {
         "ok": True,
         "query": query,
         "hits": hits,
         "recall_check": recall_check,
+        # 非空表示 hits[0] 里已经是全文，不必再取一次
+        "inlined": inlined,
         "note": "未检索到相关章节，可换用故障代码或条款号重试。" if not hits else None,
     }
 

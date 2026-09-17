@@ -242,3 +242,77 @@ class TestRefusalLedger:
         assert r["refusals"] == 0
         assert r["peak_attempt_db_rows_pct"] is None
         assert r["peak_attempt_doc_chars_pct"] is None
+
+
+class TestSingleDocGuard:
+    """单文档档（2026-09-18 补）。
+
+    起因：阈值的分母原来是两份文档合计 6538 字符，而故障处理手册全文只有 3845 —— 
+    整本手册逐节取进上下文，合计口径只有 57%，低于 70% 的阈值，护栏一声不吭。
+    红线说的是"整份文档"，合计档答不上这个问题。
+    """
+
+    def _manual_sections(self):
+        from tools.retriever import get_index
+
+        return [c for c in get_index().chunks if c.doc == "fault_manual"]
+
+    def test_whole_document_is_blocked_before_it_is_whole(self):
+        b = ContextBudget()
+        blocked = None
+        for c in self._manual_sections():
+            draw = Draw(units=(("fault_manual:%s" % c.section_id, len(c.text)),))
+            blocked = b.would_exceed(draw)
+            if blocked:
+                break
+            b.charge(draw)
+        assert blocked and "故障处理手册" in blocked
+        # 拦下的那一刻合计档还远没到阈值 —— 正是旧口径放行的那条路
+        assert b.report()["doc_chars_pct"] < 70
+
+    def test_normal_compliance_question_is_not_hit(self):
+        """标定峰值 34.9%（P8），正常取证不该被这一档拦住。"""
+        b = ContextBudget()
+        draw = Draw(units=tuple(("safety_regulation:%s" % n, 120)
+                                for n in ("4.1", "4.2", "1.2", "3.1", "3.2", "6.1", "6.2")))
+        assert b.would_exceed(draw) is None
+
+    def test_unknown_unit_keys_skip_the_single_doc_gauge(self):
+        """认不出文档的取数照常计入合计档，但不参与单文档判据。"""
+        b = ContextBudget()
+        assert b.would_exceed(chars(2000, tag="未登记工具")) is None
+        b.charge(chars(2000, tag="未登记工具"))
+        assert b.report()["peak_single_doc_pct"] == 0.0
+
+    def test_refusal_records_the_single_doc_water_line(self):
+        b = ContextBudget()
+        draw = Draw(units=(("fault_manual:24002", 3000),))
+        reason = b.would_exceed(draw)
+        assert reason
+        b.note_refusal(draw, reason)
+        # 被拒不计费，已计费的单文档水位停在 0——只看它就永远画不出撞线
+        r = b.report()
+        assert r["peak_single_doc_pct"] == 0.0
+        assert r["peak_attempt_single_doc_pct"] > 60
+
+    def test_report_lists_every_document_even_untouched(self):
+        """一份都没读到的文档也要出现在表里：缺行会被读成"这份没有分母"。"""
+        rows_ = ContextBudget().report()["doc_chars_by_doc"]
+        assert {d["doc"] for d in rows_} == {"fault_manual", "safety_regulation"}
+        assert all(d["total"] > 0 and d["limit"] > 0 for d in rows_)
+
+    def test_repeated_clause_inlining_is_not_mistaken_for_emptying_the_doc(self):
+        """26 条跑测里误伤 3 次的那个形状（X2 / P8）：`check_rule` 的通则调用会内联
+        同一批条款原文，一个合规问题连调两次，累计取回就顶到单文档上限——而去重后
+        其实只读了规程的三分之一。红线问的是"整份文档是不是被搬进去了"，那是去重口径。
+        """
+        b = ContextBudget()
+        clauses = tuple(("safety_regulation:%s" % n, 160)
+                        for n in ("4.1", "4.2", "3.3", "5.1", "5.2"))
+        for _ in range(4):                      # 同一批条款反复内联四次
+            draw = Draw(units=clauses)
+            assert b.would_exceed(draw) is None
+            b.charge(draw)
+        report = b.report()
+        assert report["peak_single_doc_pct"] < 60          # 去重后水位不动
+        assert report["doc_chars_drawn"] > report["doc_chars"]   # 取回档确实累计了

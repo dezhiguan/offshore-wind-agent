@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import math
 import statistics
 import threading
 import time
@@ -19,7 +18,8 @@ from datetime import datetime
 from collections import deque
 from typing import Any
 
-from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO
+from agent.tracing import answer_ms, answer_share_pct, latency_buckets, p95 as _p95
+from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO, MAX_SINGLE_DOC_RATIO
 
 MAX_TRACES = 50
 
@@ -144,25 +144,21 @@ def get(trace_id: int) -> dict[str, Any] | None:
         return next((t for t in _traces if t["id"] == trace_id), None)
 
 
-def _p95(values: list[int]) -> int | None:
-    """最近秩（nearest-rank）：至少 95% 的样本不超过它。
-
-    原先取 ``round(0.95 * (n - 1))``，n=39 时落在第 37 位，把最慢的两条整个排除在外，
-    报出来的数比真实的第 95 百分位低一截。延迟指标宁可偏保守也不能偏乐观——
-    偏乐观的那一版，恰恰在最该示警的时候最好看。
-    """
-    if not values:
-        return None
-    ordered = sorted(values)
-    return ordered[math.ceil(0.95 * len(ordered)) - 1]
-
-
 def stats(source: str | None = None) -> dict[str, Any]:
     items = _pick(source)
     if not items:
         return {"count": 0}
     # 「端到端耗时」就按端到端取：served_ms 含收口后处理，老记录没有它才退回 elapsed_ms
     lat = [t.get("served_ms") or t["elapsed_ms"] for t in items if t.get("elapsed_ms")]
+    # 耗时构成：按工具调用次数分桶，并摘出"写答案"那一段占了多少。
+    # 混在一起的那个 P95 描述的是题目难度分布，优化有没有效果在它上面看不出来。
+    timed = [t for t in items if t.get("served_ms") or t.get("elapsed_ms")]
+    buckets = latency_buckets([((t.get("summary") or {}).get("tool_calls") or 0,
+                                t.get("served_ms") or t.get("elapsed_ms"))
+                               for t in timed])
+    share = answer_share_pct([(answer_ms(t.get("spans") or []),
+                               t.get("served_ms") or t.get("elapsed_ms"))
+                              for t in timed])
     toks = [(t["summary"].get("prompt_tokens", 0) or 0) + (t["summary"].get("completion_tokens", 0) or 0)
             for t in items]
     costs = [t["summary"].get("cost_cny", 0) or 0 for t in items]
@@ -204,6 +200,11 @@ def stats(source: str | None = None) -> dict[str, Any]:
     attempt_doc = [t.get("budget", {}).get("peak_attempt_doc_chars_pct") for t in items]
     attempt_db = [v for v in attempt_db if v is not None]
     attempt_doc = [v for v in attempt_doc if v is not None]
+    # 单文档档（2026-09-18 补）：合计档答不上"某一份文档是不是被搬空了"
+    single_pcts = [t.get("budget", {}).get("peak_single_doc_pct") for t in items]
+    single_pcts = [v for v in single_pcts if v is not None]
+    attempt_single = [t.get("budget", {}).get("peak_attempt_single_doc_pct") for t in items]
+    attempt_single = [v for v in attempt_single if v is not None]
 
     # 接地校验：回答里的数字与条款号，是否真在证据里出现过。
     # off 档不做检查，不能混进分母 —— 否则关掉校验会让"零存疑"看着像质量变好了。
@@ -237,6 +238,9 @@ def stats(source: str | None = None) -> dict[str, Any]:
         # 界面上那条红线画在哪，跟着护栏的阈值走，不在前端另写一份
         "limit_row_pct": round(MAX_ROW_RATIO * 100, 1),
         "limit_doc_pct": round(MAX_DOC_RATIO * 100, 1),
+        "limit_single_doc_pct": round(MAX_SINGLE_DOC_RATIO * 100, 1),
+        "peak_single_doc_pct": max(single_pcts) if single_pcts else None,
+        "peak_attempt_single_doc_pct": max(attempt_single) if attempt_single else None,
         "guard_refusals": guard_refusals,
         "peak_attempt_db_rows_pct": max(attempt_db) if attempt_db else None,
         "peak_attempt_doc_chars_pct": max(attempt_doc) if attempt_doc else None,
@@ -249,6 +253,8 @@ def stats(source: str | None = None) -> dict[str, Any]:
         "format_fallback": format_fallback,
         # 延迟的样本数与链路条数不一定相等：没测到耗时的那些进不了分位数
         "latency_samples": len(lat),
+        "latency_by_tools": buckets,
+        "answer_share_pct": share,
         "p95_ms": _p95(lat),
         "p50_ms": int(statistics.median(lat)) if lat else None,
         "avg_tokens": round(statistics.mean(toks)) if toks else None,

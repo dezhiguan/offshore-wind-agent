@@ -24,8 +24,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agent.composer import detect_sources  # noqa: E402
+from agent.tracing import (  # noqa: E402
+    answer_ms, answer_share_pct, latency_buckets, p95 as _p95,
+)
 from eval.verdict import SUITES, check  # noqa: E402
-from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO  # noqa: E402
+from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO, MAX_SINGLE_DOC_RATIO  # noqa: E402
 
 OUT_DIR = ROOT / "eval" / "out"
 EVAL_DIR = ROOT / "eval"
@@ -125,7 +128,8 @@ def _trace_record(item: dict[str, Any]) -> dict[str, Any]:
         "grounding": {"mode": item.get("grounding")} if item.get("grounding") else {},
         "format_parsed": None,
         "budget": {"db_rows_pct": item.get("db_rows_pct"),
-                   "doc_chars_pct": item.get("doc_chars_pct")},
+                   "doc_chars_pct": item.get("doc_chars_pct"),
+                   "peak_single_doc_pct": item.get("single_doc_pct")},
         "sources": item.get("sources") or [],
         "answer": answer,
         "unverifiable": item.get("unverifiable") or [],
@@ -250,6 +254,10 @@ def load() -> dict[str, Any]:
             "stop_reason": meta.get("stop_reason"),
             "db_rows_pct": budget.get("db_rows_pct"),
             "doc_chars_pct": budget.get("doc_chars_pct"),
+            # 单文档档是 2026-09-18 才加的：这一天之前落盘的产物里没有这个字段。
+            # 缺失就是缺失，None 会让界面整格不出现——补成 0 会被读成"一份都没读到"。
+            "single_doc_pct": budget.get("peak_single_doc_pct"),
+            "attempt_single_doc_pct": budget.get("peak_attempt_single_doc_pct"),
             "sources": result.get("sources", []),
             "model": meta.get("model"),
             "grounding": (meta.get("grounding") or {}).get("mode"),
@@ -309,6 +317,9 @@ def load() -> dict[str, Any]:
 
     pcts_row = [i["db_rows_pct"] for i in items if i["db_rows_pct"] is not None]
     pcts_doc = [i["doc_chars_pct"] for i in items if i["doc_chars_pct"] is not None]
+    pcts_one = [i["single_doc_pct"] for i in items if i.get("single_doc_pct") is not None]
+    att_one = [i["attempt_single_doc_pct"] for i in items
+               if i.get("attempt_single_doc_pct") is not None]
     return {
         "items": items,
         "summary": summary,
@@ -323,6 +334,11 @@ def load() -> dict[str, Any]:
             # 红线画在哪跟着护栏的阈值走，不在前端另写一份
             "limit_row_pct": round(MAX_ROW_RATIO * 100, 1),
             "limit_doc_pct": round(MAX_DOC_RATIO * 100, 1),
+            "peak_single_doc_pct": max(pcts_one) if pcts_one else None,
+            "peak_attempt_single_doc_pct": max(att_one) if att_one else None,
+            "limit_single_doc_pct": round(MAX_SINGLE_DOC_RATIO * 100, 1),
+            # 这一档之前落盘的产物里没有单文档水位，整格不画比画一个 0% 诚实
+            "single_doc_samples": len(pcts_one),
         },
     }
 
@@ -331,13 +347,10 @@ def _pct(num: int, den: int) -> float | None:
     return round(num / den * 100, 1) if den else None
 
 
-def _p95(values: list[int]) -> int | None:
-    """P95。样本很少时按最接近的序位取，不做插值——26 条样本上插值是假精度。"""
-    if not values:
-        return None
-    ordered = sorted(values)
-    idx = min(len(ordered) - 1, int(round(0.95 * (len(ordered) - 1))))
-    return ordered[idx]
+# P95 与耗时构成用与线上档同一份实现（agent.tracing）。
+# 两处各写一份的后果已经发生过：这里原先用 round(0.95 * (n - 1))，n=39 时把最慢的
+# 两条整个排除在外，而线上档的注释早已把这个写法判为偏乐观 —— 同一个「P95 端到端
+# 耗时」在两个页面上算出不同的数，谁也说不清该信哪个。
 
 
 def metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -378,6 +391,10 @@ def metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
     tj = tc - tr_
 
     lat = [i["elapsed_ms"] for i in items if i.get("elapsed_ms")]
+    timed = [i for i in items if i.get("elapsed_ms")]
+    buckets = latency_buckets([(i.get("tool_calls") or 0, i["elapsed_ms"]) for i in timed])
+    share = answer_share_pct([(answer_ms(i.get("spans") or []), i["elapsed_ms"])
+                              for i in timed])
     toks = [i["tokens"] for i in items if i.get("tokens")]
     costs = [i["cost_cny"] for i in items if i.get("cost_cny") is not None]
 
@@ -395,7 +412,11 @@ def metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
                                  normal, n, "· 其中 %d 条链路内有降级或工具失败" % rough if rough else "")},
         "p95_latency_ms": {"value": _p95(lat),
                            "note": ("P50 %.1fs · 样本 %d" % (statistics.median(lat) / 1000, len(lat)))
-                                   if lat else "无数据"},
+                                   if lat else "无数据",
+                           # 混算的分位数描述的是题目难度分布；按工具调用次数分桶，
+                           # 才看得出优化动的是哪一类题
+                           "buckets": buckets,
+                           "answer_share_pct": share},
         "avg_tokens": {"value": round(statistics.mean(toks)) if toks else None,
                        "note": ("缓存命中均值 %d" % round(statistics.mean(
                            [i.get("cached_tokens") or 0 for i in items]))) if toks else "无数据"},

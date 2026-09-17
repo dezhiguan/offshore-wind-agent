@@ -104,3 +104,76 @@ def test_unparsable_draft_degrades_and_flags_it():
     out = compose("q", run)
     assert out["answer"] == "模型没按格式输出的一段自由文本"
     assert out["meta"]["format_parsed"] is False
+
+
+class TestBasisRenderedFromEvidence:
+    """「依据」由代码从证据渲染（2026-09-18 改）。
+
+    原先这一段由模型复述，约 300 字符、3~4 秒。它复述的恰恰是 evidence 里已有的
+    东西——规则的 verdict 是规则引擎算出来的原话，命中行数是执行结果。
+    让模型再说一遍，既花时间，又多一次转述漂移的机会。
+    """
+
+    def test_basis_ignores_what_the_model_wrote(self):
+        """草稿里就算还留着「依据」段，也以证据为准——两者不一致时，编的是前者。"""
+        run = dict(RUN, draft=DRAFT.replace("alarm_records：4 条记录", "alarm_records：400 条记录"))
+        assert not any("400 条" in line for line in compose("q", run)["basis"])
+
+    def test_rule_verdict_is_used_verbatim_with_clause_prefix(self):
+        run = dict(RUN, evidence={"tables": [], "docs": [], "rules": [
+            {"rule": "repeat_fault", "result": {
+                "ok": True, "clauses": ["3.2", "3.1"],
+                "verdict": "构成重复故障：最大连续 24 小时窗口内发生 4 次。"}}]})
+        assert compose("q", run)["basis"] == [
+            "第 3.1、3.2 条 · 构成重复故障：最大连续 24 小时窗口内发生 4 次。"]
+
+    def test_clause_inlined_by_rule_is_not_listed_twice(self):
+        """同一条款既被规则内联、又被单独取回时只出现一次，否则读起来像两项证据。"""
+        run = dict(RUN, evidence={
+            "tables": [],
+            "docs": [{"doc": "海上风电机组检修作业与安全管理规程.md", "section_id": "3.1",
+                      "title": "第 3.1 条 重复故障", "text": "### 第 3.1 条\n连续 24 小时内 3 次及以上。"}],
+            "rules": [{"rule": "repeat_fault", "result": {
+                "ok": True, "clauses": ["3.1"], "verdict": "构成重复故障。"}}]})
+        assert compose("q", run)["basis"] == ["第 3.1 条 · 构成重复故障。"]
+
+    def test_empty_result_shows_the_condition_it_queried(self):
+        """查空时「查了什么没查到」才是依据，只说「无匹配」等于没说。"""
+        run = dict(RUN, evidence={"rules": [], "docs": [], "tables": [
+            {"sql": "SELECT * FROM alarm_records WHERE turbine_id='T20' ORDER BY occurred_at",
+             "rows": [], "row_count": 0}]})
+        line = compose("q", run)["basis"][0]
+        assert "turbine_id='T20'" in line and "无匹配记录" in line
+        assert "order by" not in line.lower()
+
+    def test_single_cell_aggregate_shows_the_number(self):
+        run = dict(RUN, evidence={"rules": [], "docs": [], "tables": [
+            {"sql": "SELECT COUNT(*) AS n FROM alarm_records", "columns": ["n"],
+             "rows": [{"n": 47}], "row_count": 1}]})
+        assert compose("q", run)["basis"] == ["`alarm_records` → n = 47"]
+
+    def test_overflow_is_announced_not_silently_dropped(self):
+        run = dict(RUN, evidence={"tables": [], "docs": [], "rules": [
+            {"rule": "r%d" % i, "result": {"ok": True, "clauses": [], "verdict": "判定 %d。" % i}}
+            for i in range(9)]})
+        basis = compose("q", run)["basis"]
+        assert len(basis) == 7                      # 6 行 + 1 行说明
+        assert "另有 3 项依据" in basis[-1]
+
+    def test_falls_back_to_the_draft_when_there_is_no_evidence(self):
+        """未取证拒答、或复放老链路时不能整段空掉。"""
+        run = dict(RUN, evidence={"tables": [], "docs": [], "rules": []})
+        assert len(compose("q", run)["basis"]) == 2  # 回落到草稿里那两行
+
+    def test_general_rule_keeps_its_clause_sections(self):
+        """通则调用的 verdict 是一句免责说明，压掉条款行就只剩这句话了。"""
+        run = dict(RUN, evidence={
+            "tables": [],
+            "docs": [{"doc": "海上风电机组检修作业与安全管理规程.md", "section_id": "4.1",
+                      "title": "第 4.1 条 禁止远程复位", "text": "### 第 4.1 条\n以下情形禁止远程复位。"}],
+            "rules": [{"rule": "remote_reset_ban", "result": {
+                "ok": True, "is_general": True, "clauses": ["4.1"],
+                "verdict": "未指定 turbine_id，以下是通则要求，未针对任何具体工单作出判定。"}}]})
+        basis = compose("q", run)["basis"]
+        assert len(basis) == 2
+        assert "第 4.1 条 禁止远程复位" in basis[1]

@@ -93,6 +93,11 @@ button.run:disabled{opacity:.42;cursor:default}
 .tabs button .ts{display:block;font-size:10.5px;color:var(--muted);font-weight:400;margin-top:2px}
 
 /* 口径旁白：指标下面那句"这个数字是怎么来的、样本是谁" */
+.bkt{margin:12px 2px 0;font-size:11.5px;color:var(--muted)}
+.bkt table{width:100%;font-size:11.5px;table-layout:auto}
+.bkt th,.bkt td{padding:6px 10px}
+.bkt td.num{font-family:var(--mono);text-align:right;color:var(--ink-2)}
+.bkt caption{caption-side:top;text-align:left;padding:0 2px 7px;color:var(--muted);font-size:11.5px}
 .note{font-size:11.5px;color:var(--muted);line-height:1.7;margin:11px 2px 0}
 .note b{color:var(--ink-2)}
 .note.warn{color:var(--warn);background:var(--warn-soft);border-radius:6px;padding:9px 12px}
@@ -524,6 +529,25 @@ function meter(label, value, limit, foot, attempt) {
     <div class="cap-note">${foot}</div></div>`;
 }
 
+/* 耗时分桶。
+   混在一起的 P95 描述的是**题目难度分布**：一步就能答的题与要查六步的题进同一个
+   分位数，优化做没做出来会被题目组合的波动盖掉。按工具调用次数分桶才对得起来。
+   「成文」是最后一次写答案的模型调用——它按字符数线性增长，是最大的单项。 */
+function latencyBreakdown(buckets, sharePct) {
+  if (!buckets || !buckets.length) return '';
+  const rows = buckets.map(b => `<tr><td>${esc(b.bucket)}</td>
+      <td class="num">${b.count}</td>
+      <td class="num">${(b.p50_ms / 1000).toFixed(1)}s</td>
+      <td class="num">${(b.p95_ms / 1000).toFixed(1)}s</td></tr>`).join('');
+  return `<div class="bkt"><table>
+      <caption>按工具调用次数分桶 —— 上面那个混算的分位数，描述的是题目难度分布</caption>
+      <thead><tr><th>链路</th><th class="num">样本</th><th class="num">P50</th>
+        <th class="num">P95</th></tr></thead><tbody>${rows}</tbody></table>
+    ${sharePct == null ? '' : `<p class="note">其中<b>「答案成文」这一次模型调用</b>占端到端
+      <b>${sharePct.toFixed(1)}%</b>（中位数）。它按输出字符数线性增长，
+      是耗时的最大单项；工具执行实测合计不到 1%。</p>`}</div>`;
+}
+
 // RAG / RULE 是 span 采集时的内部分类，看链路的人只关心"这一步是模型还是工具调用"。
 // 只改展示，不动 span.kind 本身——指标口径与用例筛选仍按原分类统计。
 const TOOL_KINDS = ['TOOL', 'RAG', 'RULE'];
@@ -674,7 +698,9 @@ async function loadEval() {
         ${metric('单任务成本', 'CNY', m('cost_per_task').value == null ? null
                  : '¥' + m('cost_per_task').value.toFixed(4), '', m('cost_per_task').note,
                  '', delta('cost_per_task'))}
-      </div></section>
+      </div>
+      ${latencyBreakdown(m('p95_latency_ms').buckets, m('p95_latency_ms').answer_share_pct)}
+      </section>
 
     <section class="blk">${hd('上下文红线', '读到了多少语料 · 去重口径 · 峰值')}
       <div class="meters">
@@ -682,7 +708,14 @@ async function loadEval() {
           '题面要求不得将整个数据库放入上下文。系统在每次工具调用前预检，<b>覆盖</b>（去重）与<b>累计取回</b>（含重复）任一超阈值即拒绝并要求收窄查询。')}
         ${meter('文档字符覆盖', t.peak_doc_chars_pct, t.limit_doc_pct ?? 70,
           '文档侧阈值放宽到 <b>70%</b>：一个复杂合规问题天然需要 5~8 个条款加一节手册，定在 50% 会误伤正常取证。')}
-      </div></section>
+        ${!t.single_doc_samples ? '' : meter('单份文档覆盖', t.peak_single_doc_pct, t.limit_single_doc_pct ?? 60,
+          '合计档管不到"某一份被搬空"：故障处理手册全文只占合计语料的 59%，整本取进去也不到 70%。红线说的是<b>整份文档</b>，因此每份文档各设一档 <b>60%</b>（标定峰值 34.9%，留 1.7 倍余量）。',
+          t.peak_attempt_single_doc_pct)}
+      </div>
+      ${t.single_doc_samples ? '' : `<p class="note">「单份文档覆盖」这一档 2026-09-18 才加，
+        当前产物是此前落盘的，没有这个水位。<b>重跑一轮用例</b>即可出现——
+        补成 0% 会被读成"一份文档都没读到"。</p>`}
+      </section>
 
     <section class="blk">${hd('用例', '点击任意一行到链路追踪逐段复核')}
       <p class="note">样本 = <b>eval/ 下的固定用例</b>（回归 / 探针 / 施压三组），
@@ -825,7 +858,9 @@ async function loadOnline() {
                  `${s.count} 次问答 · 累计 ${((s.avg_tokens || 0) * s.count / 10000).toFixed(1)} 万 tok`)}
         ${metric('单次问答成本', 'CNY', s.avg_cost == null ? null
                  : '¥' + s.avg_cost.toFixed(4), '', `累计 ¥${(s.total_cost || 0).toFixed(4)}`)}
-      </div></section>
+      </div>
+      ${latencyBreakdown(s.latency_by_tools, s.answer_share_pct)}
+      </section>
 
     <section class="blk">${hd('上下文红线', '真实提问读到了多少语料 · 峰值')}
       <div class="meters">
@@ -836,6 +871,10 @@ async function loadOnline() {
           `线上峰值，<b>去重口径</b>：同一节先被检索命中、后被整节取回，按见过的最大篇幅算一次。文档侧阈值放宽到 <b>${
             s.limit_doc_pct ?? 70}%</b>：一个复杂合规问题天然需要 5~8 个条款加一节手册。`,
           s.peak_attempt_doc_chars_pct)}
+        ${meter('单份文档覆盖', s.peak_single_doc_pct, s.limit_single_doc_pct ?? 60,
+          `线上峰值，取两份文档中较高的那一份。合计档管不到"某一份被搬空"——故障处理手册全文只占合计语料的 59%，整本取进上下文也到不了合计阈值。红线说的是<b>整份文档</b>，因此每份各设一档 <b>${
+            s.limit_single_doc_pct ?? 60}%</b>。`,
+          s.peak_attempt_single_doc_pct)}
       </div>
       ${s.guard_refusals ? `<p class="note"><b class="warn">护栏已触发 ${s.guard_refusals} 次</b>：
         被拒绝的取证不进用量，所以上面两条实线永远停在阈值以下 —— 斜纹段才是被拦下时想压到的水位。

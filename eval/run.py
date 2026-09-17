@@ -24,7 +24,7 @@ load_dotenv(ROOT / ".env")
 
 from agent import evalview, grounding  # noqa: E402
 from agent.composer import compose  # noqa: E402
-from agent.loop import run_agent  # noqa: E402
+from agent.loop import run_agent, warm_up  # noqa: E402
 from eval.verdict import check  # noqa: E402
 
 OUT_DIR = ROOT / "eval" / "out"
@@ -43,6 +43,10 @@ def main(argv: list[str]) -> int:
         suite, argv = argv[0], argv[1:]
     wanted = {a.upper() for a in argv} or None
     cases = [c for c in load_cases(suite) if not wanted or c["id"].upper() in wanted]
+
+    # 先预热：不预热的话第一条用例会多背一个索引冷启动（实测约 1.2 秒），
+    # 而这批数字正是用来判断优化有没有效果的，不能掺进去。
+    warm_up()
 
     rows, passed = [], 0
     for case in cases:
