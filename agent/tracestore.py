@@ -10,15 +10,16 @@
 """
 from __future__ import annotations
 
-import math
 import statistics
 import threading
+import time
 import uuid
 from datetime import datetime
 from collections import deque
 from typing import Any
 
-from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO
+from agent.tracing import answer_ms, answer_share_pct, latency_buckets, p95 as _p95
+from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO, MAX_SINGLE_DOC_RATIO
 
 MAX_TRACES = 50
 
@@ -61,7 +62,7 @@ def _diagnose(spans: list[dict[str, Any]], meta: dict[str, Any]) -> tuple[str, l
 
 
 def record(question: str, result: dict[str, Any], *, source: str = "online",
-           replay: bool = False, error: str | None = None) -> None:
+           replay: bool = False, error: str | None = None) -> int | None:
     """留存一条链路。error 非空表示这次运行是失败收场（模型超时、网关报错等）。
 
     失败也要进来：后台的成功率如果只统计跑通的链路，分母里就没有失败，
@@ -75,7 +76,7 @@ def record(question: str, result: dict[str, Any], *, source: str = "online",
     global _seq
     spans = result.get("spans") or []
     if not spans and not replay and not error:
-        return
+        return None
     ts = result.get("trace_summary") or {}
     meta = result.get("meta") or {}
     status, notes = _diagnose(spans, meta)
@@ -91,6 +92,9 @@ def record(question: str, result: dict[str, Any], *, source: str = "online",
             # 短 id 仅用于展示与检索，不参与任何逻辑
             "short_id": uuid.uuid4().hex[:12],
             "at": datetime.now().strftime("%m-%d %H:%M:%S"),
+            # 排序用的数值时间。离线评测的产物要和留存的链路并进同一个列表，
+            # "%m-%d %H:%M:%S" 这种展示串跨年就排不对，比较也慢。
+            "at_ts": time.time(),
             "status": status,
             "notes": notes,
             "question": question,
@@ -106,6 +110,8 @@ def record(question: str, result: dict[str, Any], *, source: str = "online",
             # 接地校验（shadow 档只标注、不改回答）。不留存的话影子跑等于白跑：
             # 判定层要先标定再切 enforce，而标定靠的就是这批结果。
             "grounding": meta.get("grounding") or {},
+            # 快路径影子标定：不留存的话影子跑等于白跑，切 enforce 就只能靠猜
+            "fastpath": meta.get("fastpath") or {},
             # 三段标题解析成功与否，决定上面两个回答类指标该不该被照字面读
             "format_parsed": meta.get("format_parsed"),
             "budget": meta.get("budget") or {},
@@ -115,6 +121,7 @@ def record(question: str, result: dict[str, Any], *, source: str = "online",
             "spans": spans,
             "summary": ts,
         })
+        return _seq
 
 
 def _pick(source: str | None) -> list[dict[str, Any]]:
@@ -139,25 +146,21 @@ def get(trace_id: int) -> dict[str, Any] | None:
         return next((t for t in _traces if t["id"] == trace_id), None)
 
 
-def _p95(values: list[int]) -> int | None:
-    """最近秩（nearest-rank）：至少 95% 的样本不超过它。
-
-    原先取 ``round(0.95 * (n - 1))``，n=39 时落在第 37 位，把最慢的两条整个排除在外，
-    报出来的数比真实的第 95 百分位低一截。延迟指标宁可偏保守也不能偏乐观——
-    偏乐观的那一版，恰恰在最该示警的时候最好看。
-    """
-    if not values:
-        return None
-    ordered = sorted(values)
-    return ordered[math.ceil(0.95 * len(ordered)) - 1]
-
-
 def stats(source: str | None = None) -> dict[str, Any]:
     items = _pick(source)
     if not items:
         return {"count": 0}
     # 「端到端耗时」就按端到端取：served_ms 含收口后处理，老记录没有它才退回 elapsed_ms
     lat = [t.get("served_ms") or t["elapsed_ms"] for t in items if t.get("elapsed_ms")]
+    # 耗时构成：按工具调用次数分桶，并摘出"写答案"那一段占了多少。
+    # 混在一起的那个 P95 描述的是题目难度分布，优化有没有效果在它上面看不出来。
+    timed = [t for t in items if t.get("served_ms") or t.get("elapsed_ms")]
+    buckets = latency_buckets([((t.get("summary") or {}).get("tool_calls") or 0,
+                                t.get("served_ms") or t.get("elapsed_ms"))
+                               for t in timed])
+    share = answer_share_pct([(answer_ms(t.get("spans") or []),
+                               t.get("served_ms") or t.get("elapsed_ms"))
+                              for t in timed])
     toks = [(t["summary"].get("prompt_tokens", 0) or 0) + (t["summary"].get("completion_tokens", 0) or 0)
             for t in items]
     costs = [t["summary"].get("cost_cny", 0) or 0 for t in items]
@@ -199,6 +202,11 @@ def stats(source: str | None = None) -> dict[str, Any]:
     attempt_doc = [t.get("budget", {}).get("peak_attempt_doc_chars_pct") for t in items]
     attempt_db = [v for v in attempt_db if v is not None]
     attempt_doc = [v for v in attempt_doc if v is not None]
+    # 单文档档（2026-09-18 补）：合计档答不上"某一份文档是不是被搬空了"
+    single_pcts = [t.get("budget", {}).get("peak_single_doc_pct") for t in items]
+    single_pcts = [v for v in single_pcts if v is not None]
+    attempt_single = [t.get("budget", {}).get("peak_attempt_single_doc_pct") for t in items]
+    attempt_single = [v for v in attempt_single if v is not None]
 
     # 接地校验：回答里的数字与条款号，是否真在证据里出现过。
     # off 档不做检查，不能混进分母 —— 否则关掉校验会让"零存疑"看着像质量变好了。
@@ -208,6 +216,15 @@ def stats(source: str | None = None) -> dict[str, Any]:
                       if (t.get("grounding") or {}).get("mode")})
     # 三段格式没解析出来的链路：回答类指标要照这个数打折看
     format_fallback = sum(1 for t in items if t.get("format_parsed") is False)
+
+    # 快路径：命中率与一致率必须分开看。命中率高而一致率低，说明判据认错了题——
+    # 那正是切 enforce 会把另一个问题的答案喂给模型的情形。
+    fps = [t.get("fastpath") or {} for t in items]
+    fp_modes = sorted({f.get("mode") for f in fps if f.get("mode")})
+    fp_matched = sum(1 for f in fps if f.get("matched"))
+    fp_applied = sum(1 for f in fps if f.get("applied"))
+    fp_judged = [f for f in fps if f.get("agreed") is not None]
+    fp_agreed = sum(1 for f in fp_judged if f.get("agreed"))
     return {
         "count": len(items),
         "capacity": MAX_TRACES,
@@ -232,6 +249,9 @@ def stats(source: str | None = None) -> dict[str, Any]:
         # 界面上那条红线画在哪，跟着护栏的阈值走，不在前端另写一份
         "limit_row_pct": round(MAX_ROW_RATIO * 100, 1),
         "limit_doc_pct": round(MAX_DOC_RATIO * 100, 1),
+        "limit_single_doc_pct": round(MAX_SINGLE_DOC_RATIO * 100, 1),
+        "peak_single_doc_pct": max(single_pcts) if single_pcts else None,
+        "peak_attempt_single_doc_pct": max(attempt_single) if attempt_single else None,
         "guard_refusals": guard_refusals,
         "peak_attempt_db_rows_pct": max(attempt_db) if attempt_db else None,
         "peak_attempt_doc_chars_pct": max(attempt_doc) if attempt_doc else None,
@@ -242,8 +262,19 @@ def stats(source: str | None = None) -> dict[str, Any]:
         "grounding_flagged_rate": round(g_flagged / len(checked) * 100, 1) if checked else None,
         "grounding_flagged_items": sum(len(t["grounding"].get("flagged") or []) for t in checked),
         "format_fallback": format_fallback,
+        "fastpath_mode": "、".join(fp_modes) if fp_modes else None,
+        "fastpath_matched": fp_matched,
+        "fastpath_matched_rate": round(fp_matched / len(items) * 100, 1),
+        "fastpath_applied": fp_applied,
+        # 一致率的分母只有"两边都查了库"的那些：模型没查库就无从比对，
+        # 混进分母会把"没得比"算成"比对失败"
+        "fastpath_compared": len(fp_judged),
+        "fastpath_agreed": fp_agreed,
+        "fastpath_agree_rate": round(fp_agreed / len(fp_judged) * 100, 1) if fp_judged else None,
         # 延迟的样本数与链路条数不一定相等：没测到耗时的那些进不了分位数
         "latency_samples": len(lat),
+        "latency_by_tools": buckets,
+        "answer_share_pct": share,
         "p95_ms": _p95(lat),
         "p50_ms": int(statistics.median(lat)) if lat else None,
         "avg_tokens": round(statistics.mean(toks)) if toks else None,

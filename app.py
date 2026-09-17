@@ -19,7 +19,9 @@ from pydantic import BaseModel, Field  # noqa: E402
 from admin import admin_router  # noqa: E402
 from agent import grounding, replay, tracestore  # noqa: E402
 from agent.composer import compose, stamp_served  # noqa: E402
-from agent.loop import AgentRunFailed, LlmNotConfigured, run_agent, run_agent_stream  # noqa: E402
+from agent.loop import (  # noqa: E402
+    AgentRunFailed, LlmNotConfigured, run_agent, run_agent_stream, warm_up,
+)
 from tools.db import DB_PATH, query_db  # noqa: E402
 from tools.retriever import get_index  # noqa: E402
 
@@ -33,6 +35,12 @@ app.include_router(admin_router)
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=500)
+
+
+@app.on_event("startup")
+def _warm_up() -> None:
+    """启动即预热，把冷启动的代价从第一个提问那一侧挪回到启动这一侧。"""
+    warm_up()
 
 
 @app.get("/health")

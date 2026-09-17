@@ -93,6 +93,11 @@ button.run:disabled{opacity:.42;cursor:default}
 .tabs button .ts{display:block;font-size:10.5px;color:var(--muted);font-weight:400;margin-top:2px}
 
 /* 口径旁白：指标下面那句"这个数字是怎么来的、样本是谁" */
+.bkt{margin:12px 2px 0;font-size:11.5px;color:var(--muted)}
+.bkt table{width:100%;font-size:11.5px;table-layout:auto}
+.bkt th,.bkt td{padding:6px 10px}
+.bkt td.num{font-family:var(--mono);text-align:right;color:var(--ink-2)}
+.bkt caption{caption-side:top;text-align:left;padding:0 2px 7px;color:var(--muted);font-size:11.5px}
 .note{font-size:11.5px;color:var(--muted);line-height:1.7;margin:11px 2px 0}
 .note b{color:var(--ink-2)}
 .note.warn{color:var(--warn);background:var(--warn-soft);border-radius:6px;padding:9px 12px}
@@ -351,12 +356,6 @@ dialog.ansdlg::backdrop{background:rgba(10,20,23,.42)}
 .strip .x b{font-weight:400}
 .dsec{padding:18px 22px 20px}
 
-tr.det td{background:var(--sunken);padding:0}
-.dbox{padding:16px 18px;display:none}
-tr.det.open .dbox{display:block}
-.dbox h4{font-size:9.5px;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;
-  color:var(--muted);margin:0 0 8px;font-weight:600}
-.dbox h4+*{margin-top:0}
 .ans{font-size:12.5px;white-space:pre-wrap;background:var(--surface);border:1px solid var(--line);
   border-radius:7px;padding:12px 14px;margin-bottom:14px;max-height:240px;overflow-y:auto;color:var(--ink-2)}
 .pipe{display:flex;align-items:stretch;overflow-x:auto;padding:2px 0 12px}
@@ -382,6 +381,7 @@ table.spans thead th{background:var(--surface)}
 .tg.GUARD{background:var(--warn-soft);color:var(--warn)}
 .sv{font-family:var(--mono);font-size:9.5px;font-weight:700}
 .sv.OK{color:var(--ok)} .sv.ERROR{color:var(--crit)} .sv.DEGRADED{color:var(--warn)}
+
 /* span 详情：默认收起，展开后给完整的输入输出参数 */
 button.spx{font:inherit;font-size:10px;line-height:1;cursor:pointer;padding:4px 6px;
   border-radius:5px;border:1px solid var(--line-2);background:var(--surface);color:var(--muted)}
@@ -529,6 +529,41 @@ function meter(label, value, limit, foot, attempt) {
     <div class="cap-note">${foot}</div></div>`;
 }
 
+/* 快路径影子标定。
+   命中率与一致率必须分开看：命中率高而一致率低，说明判据认错了题——切 enforce 会把
+   另一个问题的答案喂给模型。一致率的分母只有"两边都查了库"的那些，模型没查库时
+   无从比对，算进分母等于把"没得比"记成"比对失败"。 */
+function fastpathNote(fp) {
+  if (!fp || !fp.mode || !fp.total) return '';
+  const rate = fp.compared ? (fp.agreed / fp.compared * 100).toFixed(0) : null;
+  const enforcing = fp.mode.indexOf('enforce') >= 0;
+  return `<p class="note"><b>简单问题快路径 · ${esc(fp.mode)}</b>：
+    ${fp.total} 条里认出 <b>${fp.matched}</b> 条${enforcing ? `，实际接管 <b>${fp.applied}</b> 条` : ''}。
+    ${fp.compared
+      ? `与模型自己查的结果比对 ${fp.compared} 条，<b>一致 ${fp.agreed} 条（${rate}%）</b>。`
+      : '本轮没有可比对的样本。'}
+    ${enforcing ? '' : '影子档只比对、不接管，也不计入上下文预算。'}</p>`;
+}
+
+/* 耗时分桶。
+   混在一起的 P95 描述的是**题目难度分布**：一步就能答的题与要查六步的题进同一个
+   分位数，优化做没做出来会被题目组合的波动盖掉。按工具调用次数分桶才对得起来。
+   「成文」是最后一次写答案的模型调用——它按字符数线性增长，是最大的单项。 */
+function latencyBreakdown(buckets, sharePct) {
+  if (!buckets || !buckets.length) return '';
+  const rows = buckets.map(b => `<tr><td>${esc(b.bucket)}</td>
+      <td class="num">${b.count}</td>
+      <td class="num">${(b.p50_ms / 1000).toFixed(1)}s</td>
+      <td class="num">${(b.p95_ms / 1000).toFixed(1)}s</td></tr>`).join('');
+  return `<div class="bkt"><table>
+      <caption>按工具调用次数分桶 —— 上面那个混算的分位数，描述的是题目难度分布</caption>
+      <thead><tr><th>链路</th><th class="num">样本</th><th class="num">P50</th>
+        <th class="num">P95</th></tr></thead><tbody>${rows}</tbody></table>
+    ${sharePct == null ? '' : `<p class="note">其中<b>「答案成文」这一次模型调用</b>占端到端
+      <b>${sharePct.toFixed(1)}%</b>（中位数）。它按输出字符数线性增长，
+      是耗时的最大单项；工具执行实测合计不到 1%。</p>`}</div>`;
+}
+
 // RAG / RULE 是 span 采集时的内部分类，看链路的人只关心"这一步是模型还是工具调用"。
 // 只改展示，不动 span.kind 本身——指标口径与用例筛选仍按原分类统计。
 const TOOL_KINDS = ['TOOL', 'RAG', 'RULE'];
@@ -584,21 +619,6 @@ const miniBar = (v, hot) => v == null ? '—'
 /* ── 离线评测 ──
    固定用例 + 断言：有标准答案，所以这一档可以直接判对错，「结果准确率」
    只在这里出现。线上那一档拿不到标准答案，见 loadOnline。 */
-function evalDetail(it) {
-  const ev = it.evidence || {};
-  const sql = (ev.tables || []).map((t, i) =>
-    `<div class="ans">-- 查询 ${i + 1}，命中 ${t.row_count ?? 0} 行\n${esc(t.sql)}</div>`).join('');
-  return `<div class="dbox">
-    ${it.sources?.length ? `<h4>使用的数据源</h4><div style="margin-bottom:14px">${
-      it.sources.map(s => `<span class="chip">${esc(s)}</span>`).join('')}</div>` : ''}
-    <h4>回答</h4><div class="ans">${text(it.answer) || '（无）'}</div>
-    ${it.unverifiable?.length ? `<h4>现有资料无法确认（${it.unverifiable.length} 项）</h4>
-      <div class="ans">${it.unverifiable.map(u => '· ' + text(u)).join('\n')}</div>` : ''}
-    ${it.spans?.length ? `<h4>Span 明细${it.cost_cny != null
-        ? ` · ${it.model_calls} 次模型调用 · ${it.tokens} tok · ¥${it.cost_cny.toFixed(4)}` : ''}</h4>
-      ${pipeline(it.spans)}${spanTable(it.spans)}` : ''}
-    ${sql ? `<h4>执行过的 SQL</h4>${sql}` : ''}</div>`;
-}
 function suiteTable(items) {
   return `<div class="tw"><table>
     <colgroup><col style="width:92px"><col><col style="width:70px"><col style="width:70px">
@@ -606,7 +626,7 @@ function suiteTable(items) {
     <thead><tr><th>#</th><th>问题</th><th>结果</th><th style="text-align:right">耗时</th>
       <th style="text-align:right">工具</th><th>数据行用量</th><th>文档用量</th></tr></thead>
     <tbody>${items.map(it => `
-      <tr class="row" data-id="${esc(it.id)}">
+      <tr class="row" data-id="${esc(it.id)}" data-trace="${esc(it.trace_id ?? it.trace_ref)}">
         <td class="id"><input type="checkbox" class="pick" value="${esc(it.id)}"
           onclick="event.stopPropagation()" style="margin-right:6px;vertical-align:-1px">${esc(it.id)}</td>
         <td>${esc(clip(it.question, 52))}
@@ -617,8 +637,7 @@ function suiteTable(items) {
         <td class="num">${it.steps ?? '—'}</td>
         <td class="num">${miniBar(it.db_rows_pct, (it.db_rows_pct ?? 0) > 40)}</td>
         <td class="num">${miniBar(it.doc_chars_pct, (it.doc_chars_pct ?? 0) > 55)}</td>
-      </tr>
-      <tr class="det"><td colspan="7">${evalDetail(it)}</td></tr>`).join('')}
+      </tr>`).join('')}
     </tbody></table></div>`;
 }
 async function loadEval() {
@@ -695,7 +714,10 @@ async function loadEval() {
         ${metric('单任务成本', 'CNY', m('cost_per_task').value == null ? null
                  : '¥' + m('cost_per_task').value.toFixed(4), '', m('cost_per_task').note,
                  '', delta('cost_per_task'))}
-      </div></section>
+      </div>
+      ${latencyBreakdown(m('p95_latency_ms').buckets, m('p95_latency_ms').answer_share_pct)}
+      ${fastpathNote(t.fastpath)}
+      </section>
 
     <section class="blk">${hd('上下文红线', '读到了多少语料 · 去重口径 · 峰值')}
       <div class="meters">
@@ -703,17 +725,29 @@ async function loadEval() {
           '题面要求不得将整个数据库放入上下文。系统在每次工具调用前预检，<b>覆盖</b>（去重）与<b>累计取回</b>（含重复）任一超阈值即拒绝并要求收窄查询。')}
         ${meter('文档字符覆盖', t.peak_doc_chars_pct, t.limit_doc_pct ?? 70,
           '文档侧阈值放宽到 <b>70%</b>：一个复杂合规问题天然需要 5~8 个条款加一节手册，定在 50% 会误伤正常取证。')}
-      </div></section>
+        ${!t.single_doc_samples ? '' : meter('单份文档覆盖', t.peak_single_doc_pct, t.limit_single_doc_pct ?? 60,
+          '合计档管不到"某一份被搬空"：故障处理手册全文只占合计语料的 59%，整本取进去也不到 70%。红线说的是<b>整份文档</b>，因此每份文档各设一档 <b>60%</b>（标定峰值 34.9%，留 1.7 倍余量）。',
+          t.peak_attempt_single_doc_pct)}
+      </div>
+      ${t.single_doc_samples ? '' : `<p class="note">「单份文档覆盖」这一档 2026-09-18 才加，
+        当前产物是此前落盘的，没有这个水位。<b>重跑一轮用例</b>即可出现——
+        补成 0% 会被读成"一份文档都没读到"。</p>`}
+      </section>
 
-    <section class="blk">${hd('用例', '点击任意一行展开完整执行链路')}
+    <section class="blk">${hd('用例', '点击任意一行到链路追踪逐段复核')}
       <p class="note">样本 = <b>eval/ 下的固定用例</b>（回归 / 探针 / 施压三组），
         与线上流量无关；这批链路在追踪页标为 <b>回归</b>，不进线上质量的分母。</p>
       ${d.summary.map(s => `<div class="hd" style="margin-top:16px"><span class="d"
         style="font-weight:600;color:var(--ink-2)">${esc(s.label)}</span><span class="line"></span></div>` +
         suiteTable(d.items.filter(i => i.suite === s.suite))).join('')}
     </section>`;
-  box.querySelectorAll('tr.row').forEach(tr => tr.onclick = () =>
-    tr.nextElementSibling?.classList.toggle('open'));
+  // 与「线上质量」的最近问答表同一个动作：带着这一条跳到链路追踪。
+  // 原先是就地展开一份缩水版的链路，跟追踪页两套渲染、两处走样；
+  // 而追踪页那边早就有 pipeline、span 表、护栏徽标和回答弹层。
+  box.querySelectorAll('tr.row').forEach(tr => tr.onclick = () => {
+    FOCUS = tr.dataset.trace;
+    show('traces');
+  });
 }
 
 /* ── 线上质量 ──
@@ -841,7 +875,12 @@ async function loadOnline() {
                  `${s.count} 次问答 · 累计 ${((s.avg_tokens || 0) * s.count / 10000).toFixed(1)} 万 tok`)}
         ${metric('单次问答成本', 'CNY', s.avg_cost == null ? null
                  : '¥' + s.avg_cost.toFixed(4), '', `累计 ¥${(s.total_cost || 0).toFixed(4)}`)}
-      </div></section>
+      </div>
+      ${latencyBreakdown(s.latency_by_tools, s.answer_share_pct)}
+      ${fastpathNote({mode: s.fastpath_mode, total: s.count, matched: s.fastpath_matched,
+                      applied: s.fastpath_applied, compared: s.fastpath_compared,
+                      agreed: s.fastpath_agreed})}
+      </section>
 
     <section class="blk">${hd('上下文红线', '真实提问读到了多少语料 · 峰值')}
       <div class="meters">
@@ -852,6 +891,10 @@ async function loadOnline() {
           `线上峰值，<b>去重口径</b>：同一节先被检索命中、后被整节取回，按见过的最大篇幅算一次。文档侧阈值放宽到 <b>${
             s.limit_doc_pct ?? 70}%</b>：一个复杂合规问题天然需要 5~8 个条款加一节手册。`,
           s.peak_attempt_doc_chars_pct)}
+        ${meter('单份文档覆盖', s.peak_single_doc_pct, s.limit_single_doc_pct ?? 60,
+          `线上峰值，取两份文档中较高的那一份。合计档管不到"某一份被搬空"——故障处理手册全文只占合计语料的 59%，整本取进上下文也到不了合计阈值。红线说的是<b>整份文档</b>，因此每份各设一档 <b>${
+            s.limit_single_doc_pct ?? 60}%</b>。`,
+          s.peak_attempt_single_doc_pct)}
       </div>
       ${s.guard_refusals ? `<p class="note"><b class="warn">护栏已触发 ${s.guard_refusals} 次</b>：
         被拒绝的取证不进用量，所以上面两条实线永远停在阈值以下 —— 斜纹段才是被拦下时想压到的水位。
@@ -904,7 +947,7 @@ function renderOnlineTable() {
 
   $('#otable').querySelectorAll('tr.row').forEach(tr => tr.onclick = () => {
     // 带着这一条跳过去，落在追踪页最近一条上等于点了个碰运气的按钮
-    FOCUS = Number(tr.dataset.id);
+    FOCUS = tr.dataset.id;
     show('traces');
   });
   $('#otable').querySelectorAll('button.pg').forEach(b => b.onclick = () => {
@@ -923,25 +966,10 @@ function renderOnlineTable() {
 }
 
 /* ── 链路追踪 ── */
-async function openTrace(id, cell) {
-  if (cell.dataset.loaded) { cell.parentElement.classList.toggle('open'); return; }
-  const d = await api('/api/traces/' + id);
-  cell.dataset.loaded = '1';
-  if (d.error) cell.innerHTML = `<div class="dbox">${esc(d.error)}</div>`;
-  else {
-    const b = d.budget || {}, s = d.summary || {};
-    cell.innerHTML = `<div class="dbox">
-      <h4>回答</h4><div class="ans">${text(clip(d.answer, 900)) || '（无）'}</div>
-      ${d.unverifiable?.length ? `<h4>现有资料无法确认（${d.unverifiable.length} 项）</h4>
-        <div class="ans">${d.unverifiable.map(u => '· ' + text(u)).join('\n')}</div>` : ''}
-      <h4>执行链路 · ${s.model_calls || 0} 次模型调用 · ${(s.prompt_tokens || 0) + (s.completion_tokens || 0)} tok
-        · ¥${(s.cost_cny || 0).toFixed(4)} · 上下文 ${(b.db_rows_pct ?? 0).toFixed(1)}% 行 /
-        ${(b.doc_chars_pct ?? 0).toFixed(1)}% 文档</h4>
-      ${pipeline(d.spans || [])}${spanTable(d.spans || [])}</div>`;
-  }
-  cell.parentElement.classList.add('open');
-}
 let TRACES = [], CURRENT = null, TRACE_CAP = 50, ANSWER_OF = null;
+// 列表里的两批要分开数：KEPT 是进程内留存（受 50 条上限约束），
+// FROM_ARTIFACT 是拿 eval 产物现搭的，不占留存容量
+let KEPT = 0, FROM_ARTIFACT = 0;
 
 // 回答在弹层里看完就关，追踪页的滚动位置与选中项都还在
 function openAnswer() {
@@ -991,7 +1019,7 @@ const SRC_LABEL = {online: '线上', eval: '回归'};
 function traceRow(t) {
   const srcs = (t.sources || []).map(x => x.replace(/（.*?）/, '')).join('、');
   const src = t.source === 'eval' ? 'eval' : 'online';
-  return `<div class="ti${CURRENT === t.id ? ' on' : ''}" data-id="${t.id}">
+  return `<div class="ti${CURRENT === String(t.id) ? ' on' : ''}" data-id="${t.id}">
     <span class="st ${t.status}">${
       t.status === 'SUCCESS' ? '✓' : t.status === 'FAILED' ? '✕' : '!'}</span>
     <span class="tmain">
@@ -1015,7 +1043,9 @@ function renderTraceNav(capacity) {
       ${count ? '' : 'disabled'}>${label}<b>${count}</b></button>`;
 
   box.innerHTML = `<div class="tnav">
-    <span class="seg"><span>留存</span><b>${TRACES.length}</b><span class="u">/ ${capacity}</span></span>
+    <span class="seg"><span>留存</span><b>${KEPT}</b><span class="u">/ ${capacity}</span></span>
+    ${FROM_ARTIFACT ? `<span class="seg"><span>评测产物</span><b>${FROM_ARTIFACT}</b
+      ><span class="u">不占留存</span></span>` : ''}
     <span class="bar"></span>
     ${chip('线上', n(t => (t.source || 'online') === 'online'), 'org', 'online', org)}
     ${chip('回归', n(t => t.source === 'eval'), 'org', 'eval', org)}
@@ -1049,7 +1079,7 @@ function renderList() {
     (!sc || (t.sources || []).some(x => x.includes(sc))));
   // 选中的那一条必须落在窗口里。从线上质量跳过来的可能排在第 30 条，
   // 渲染不到它就会变成：右边详情已经换了，左边一行高亮都没有。
-  const at = hit.findIndex(t => t.id === CURRENT);
+  const at = hit.findIndex(t => String(t.id) === CURRENT);
   if (at >= SHOWN) SHOWN = Math.ceil((at + 1) / PAGE) * PAGE;
 
   const page = hit.slice(0, SHOWN), rest = hit.length - page.length;
@@ -1058,7 +1088,7 @@ function renderList() {
   $('#tlist').innerHTML = hit.length ? page.map(traceRow).join('') + foot
     : '<div class="none">没有匹配的执行记录</div>';
   $('#tlist').querySelectorAll('.ti').forEach(el =>
-    el.onclick = () => selectTrace(Number(el.dataset.id)));
+    el.onclick = () => selectTrace(el.dataset.id));
   // 下拉框也能改筛选，导航条的高亮得跟着走
   renderTraceNav(TRACE_CAP);
 }
@@ -1073,14 +1103,34 @@ function resetList() {
   if (list) list.scrollTop = 0;
 }
 
+/** 把某一条滚进视野。
+ *
+ *  两层滚动都得动：#tlist 自己会滚，但它的框（实测 620px）通常比可用视口还高，
+ *  窗口矮的时候框底那一截结构上就在页面折线以下 —— 只滚框内的话，列表已经到底了
+ *  行却还在视口外，看着就是"没定位到"。scrollIntoView 会把每一层祖先都滚到，
+ *  正好覆盖这两层。
+ *
+ *  必须是 block:'center' 不能是 'nearest'：后者只做最小位移，跳过来的那条会贴死
+ *  在视口最下沿，跟没滚一样。
+ *
+ *  已经完整看得见（框内 + 视口内）就一步都不走：在列表里挨条点着看时，每点一下
+ *  都重新居中会让整列跟着跳，而点的人本来就看着它。
+ */
+function revealInList(el) {
+  if (!el) return;
+  const list = $('#tlist'), r = el.getBoundingClientRect(), lr = list?.getBoundingClientRect();
+  if (r.top >= 0 && r.bottom <= innerHeight &&
+      lr && r.top >= lr.top && r.bottom <= lr.bottom) return;
+  el.scrollIntoView({block: 'center'});
+}
+
 async function selectTrace(id) {
-  CURRENT = id;
+  CURRENT = String(id);
   renderList();
-  // 已经在视野里就不动（block:'nearest'）；跳过来的那条在窗口深处时才滚
-  $(`#tlist .ti[data-id="${id}"]`)?.scrollIntoView({block: 'nearest'});
+  revealInList($(`#tlist .ti[data-id="${id}"]`));
   const box = $('#tdetail');
   box.innerHTML = '<div class="dt"><p style="color:var(--muted);font-size:13px">加载中…</p></div>';
-  const d = await api('/api/traces/' + id);
+  const d = await api('/api/traces/' + encodeURIComponent(id));
   if (d.error) { box.innerHTML = `<div class="dt"><p>${esc(d.error)}</p></div>`; return; }
   ANSWER_OF = d;
   const s = d.summary || {}, b = d.budget || {};
@@ -1143,6 +1193,10 @@ async function selectTrace(id) {
         color:var(--muted);margin:14px 0 10px;font-weight:600">Span 明细</h4>
       ${spanTable(d.spans || [])}
     </div>`;
+  // 详情渲染完页面高度会变（占位只有一行、实际详情很长），浏览器的滚动锚定会把
+  // 刚定好的位置挪走 —— 实测选中行会被挤到视口外 110% 处。等这一帧布局落定再校
+  // 一次；已经看得见时 revealInList 一步都不走，所以不会来回抖。
+  requestAnimationFrame(() => revealInList($(`#tlist .ti[data-id="${id}"]`)));
 }
 
 /** 成本那一格的小字。价目表外的模型会落到兜底价，那是估算不是账单，必须说出来。 */
@@ -1177,12 +1231,17 @@ function budgetTitle(b) {
 
 async function loadTraces() {
   const d = await api('/api/traces'), box = $('#v-traces'), s = d.stats || {};
-  if (!s.count) {
-    box.innerHTML = `<p class="empty">进程内暂无链路记录。<br><br>到
+  // 空判断看**列表**不看留存计数：留存是进程内的，重启后 stats.count 归零，
+  // 而离线评测的产物还在、也还搭得出链路。按 count 判空会把这一页整个关掉，
+  // 从评测表跳过来正好撞在这上面。
+  if (!d.items.length) {
+    box.innerHTML = `<p class="empty">暂无可复核的链路。<br><br>到
       <a href="/">问答页</a>提一个问题，或在「Agent 质量中心 · 离线评测」里点运行，这里就会出现完整的 span 明细。</p>`;
     return;
   }
   TRACES = d.items;
+  KEPT = s.capacity_used ?? s.count ?? 0;
+  FROM_ARTIFACT = d.from_artifact || 0;
   const srcs = [...new Set(d.items.flatMap(t => (t.sources || [])
     .map(x => x.replace(/（.*?）/, ''))))];
 
@@ -1232,7 +1291,8 @@ async function loadTraces() {
   SHOWN = PAGE;
   renderList();
   // 从线上质量带过来的那一条优先；它可能已被新记录挤出留存，回退到最近一条
-  const focus = FOCUS && TRACES.some(t => t.id === FOCUS) ? FOCUS : d.items[0].id;
+  const focus = FOCUS && TRACES.some(t => String(t.id) === String(FOCUS))
+              ? String(FOCUS) : String(d.items[0].id);
   FOCUS = null;
   selectTrace(focus);
 }
@@ -1253,11 +1313,18 @@ const VIEW = {
 // 左轨点回质量中心时停在上一次看的那一档——切到追踪页再切回来被打回离线档，
 // 等于把人正在看的东西换掉了
 let QTAB = 'eval';
+// 当前视图名，show() 用它判断这次是不是真的换了视图
+let SHOWING = null;
 
 function show(name) {
   if (!VIEW[name]) name = 'eval';
   const v = VIEW[name];
   if (v.tab) QTAB = name;
+  // 换视图就回到页顶。滚动位置是**上一个**视图的：在离线评测滚到底点一行跳过来，
+  // 链路追踪这一页会从半截开始显示，概况和筛选框都在视野外。
+  // 只在真的换了视图时复位——同一档重复点（或跑完用例回到 eval）不该把人弹走。
+  const switched = name !== SHOWING;
+  SHOWING = name;
   document.querySelectorAll('.nav button').forEach(b =>
     b.classList.toggle('on', b.dataset.nav === v.nav));
   Object.keys(VIEW).forEach(k =>
@@ -1271,6 +1338,7 @@ function show(name) {
   ['#runAll', '#runSel'].forEach(sel => $(sel).style.display = name === 'eval' ? '' : 'none');
   $('#runbar')?.classList.toggle('hide', name !== 'eval');
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+  if (switched) window.scrollTo(0, 0);
   v.load();
 }
 document.querySelectorAll('.nav button').forEach(b =>

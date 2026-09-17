@@ -20,6 +20,7 @@ import json
 import os
 import time
 from collections.abc import Iterator
+from functools import lru_cache
 from typing import Any
 
 from openai import OpenAI
@@ -27,7 +28,9 @@ from openai import OpenAI
 from agent.prompts import SYSTEM_PROMPT
 from agent.tools_spec import TOOLS, TOOL_REGISTRY
 from agent.tracing import DEGRADED, ERROR, OK, TOOL_KIND, Trace
+from tools import fastpath
 from tools.budget import ContextBudget, measure
+from tools.db import query_db
 from tools.pricing import cost as price_of
 from tools.rules import cited_sections
 
@@ -39,6 +42,8 @@ MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "6"))
 MAX_UNGROUNDED_RETRIES = 1
 # 提示词强制的第一个二级标题，用作"最终答案已开始"的分界
 ANSWER_MARKER = "## 结论"
+# 快路径注入那一轮的 tool_call_id。固定值即可：一次问答最多注入一次。
+_FASTPATH_CALL_ID = "fastpath-1"
 # qwen3 系列默认开启 thinking，单次调用可达 30 秒，现场演示不可接受。
 # 关闭后靠工具与规则引擎保证正确性，而不是靠模型的内部推理。
 ENABLE_THINKING = os.getenv("ENABLE_THINKING", "false").lower() in {"1", "true", "yes"}
@@ -63,16 +68,31 @@ class AgentRunFailed(RuntimeError):
         self.partial = partial
 
 
+@lru_cache(maxsize=4)
+def _client_for(key: str, base_url: str, timeout: float) -> OpenAI:
+    """按配置缓存客户端，**跨问答复用同一个连接池**。
+
+    原先每轮问答新建一个 client，也就是每个问题都重做一次 TCP + TLS 握手。
+    本机实测（2026-09-18，经 VPN 出网）到 DashScope 的 RTT 为 386 ms，TLS 要
+    2~3 个往返，建连一项就吃掉约 0.8~1.2 秒 —— 而一次问答的全部工具执行加起来
+    才 0.92 秒。链路里"Agent 决策"那一段 1108 ms，大半是握手，不是模型在想。
+
+    缓存键带上配置：换了 base_url 或超时仍然拿到新客户端，改配置不必重启。
+    httpx 的连接池本身线程安全，多个请求共用一个 client 是 SDK 的推荐用法。
+    """
+    return OpenAI(api_key=key, base_url=base_url, timeout=timeout)
+
+
 def _client() -> OpenAI:
     key = os.getenv("DASHSCOPE_API_KEY")
     if not key:
         raise LlmNotConfigured(
             "未配置 DASHSCOPE_API_KEY。请复制 .env.example 为 .env 并填入密钥。"
         )
-    return OpenAI(
-        api_key=key,
-        base_url=os.getenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        timeout=TIMEOUT,
+    return _client_for(
+        key,
+        os.getenv("LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        TIMEOUT,
     )
 
 
@@ -275,13 +295,110 @@ def _summarize(name: str, result: dict[str, Any]) -> str:
             warn = "（低置信：%s）" % "；".join(check.get("reasons") or [])
         if not hits:
             return "未命中%s" % warn
-        return "命中 %d 节：%s%s" % (
-            len(hits), "、".join(h["title"][:24] for h in hits[:3]), warn)
+        inlined = "（已带回《%s》全文）" % result["inlined"]["title"][:24] if result.get("inlined") else ""
+        return "命中 %d 节：%s%s%s" % (
+            len(hits), "、".join(h["title"][:24] for h in hits[:3]), inlined, warn)
     if name == "get_doc_section":
         return "取回《%s》%s" % (result.get("doc", ""), result.get("title", ""))
     if name == "check_rule":
         return str(result.get("verdict", ""))[:80]
     return "完成"
+
+
+def warm_up() -> None:
+    """把懒加载的几样先建好，别让它们落在第一个问题头上。
+
+    检索索引要给两份文档分词，而 jieba 的词典是首次分词时才加载的：本机实测这一下
+    要 2.4 秒。原先它落在**进程起来后的第一个提问**上——那一题白等两秒多，看上去
+    像模型慢，其实一个 token 都还没发出去。预算分母（语料总量）同理。
+
+    服务端与命令行跑测器都要调：只在服务端预热的话，跑测产物里第一条用例会多背
+    一个冷启动，而那批数字正是用来判断优化有没有效果的。
+    """
+    from tools.budget import corpus_totals
+    from tools.retriever import get_index
+
+    get_index().search("预热")
+    corpus_totals()
+
+
+def _apply_fastpath(question: str, messages: list[dict[str, Any]], trace: list[dict[str, Any]],
+                    tr: Trace, evidence: dict[str, list[dict[str, Any]]],
+                    budget: ContextBudget) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """第一次决策调用之前：形状认得出来的简单查询，由代码直接发。
+
+    省掉的那一次调用实测 P50 2.5 秒，占一步题总耗时的 38%——它做的事只是把
+    「T06 的最新告警是什么」翻译成一条 SQL，而这类问句的形状是固定的。
+
+    **这不是终局**：接管的只是第一次工具调用，循环照常往下走。查错了方向或数据不够，
+    模型自己会再调工具，最坏情况是上下文里多一份没用上的结果（且它照常计入预算），
+    而不是拿错数据作答。风险上界由这条性质兜着，不由判据兜着。
+    """
+    plan = fastpath.match(question)
+    note: dict[str, Any] = {"mode": fastpath.MODE, "matched": plan["name"] if plan else None}
+    if not plan:
+        return note, None
+
+    note["why"], note["sql"] = plan["why"], plan["sql"]
+    result = query_db(plan["sql"])
+    bad = fastpath.shape_ok(plan, result)
+    if bad:
+        note["skipped"] = bad
+        return note, result
+    if fastpath.MODE != "enforce":
+        note["skipped"] = "影子档：照常比对，不接管"
+        return note, result
+
+    draw = measure("query_db", result)
+    refusal = budget.would_exceed(draw)
+    if refusal:
+        # 快路径自己撞上红线就直接让位。**不记护栏拦截**：这一步不是模型要查的，
+        # 记进去会让"护栏触发次数"里混进系统自己的试探，那个数就不再指示模型行为。
+        note["skipped"] = "上下文预算不允许：%s" % refusal[:60]
+        return note, result
+    budget.charge(draw)
+
+    args = {"sql": plan["sql"]}
+    span = tr.start(TOOL_KIND["query_db"], "query_db")
+    span.close(input_summary=json.dumps(args, ensure_ascii=False)[:160],
+               output_summary=_summarize("query_db", result),
+               input_detail=_detail(args), output_detail=_detail(result),
+               status=OK, fastpath=plan["name"])
+    entry = {"step": 1, "tool": "query_db", "input": args, "ok": True,
+             "refused": False, "fastpath": plan["name"],
+             "summary": _summarize("query_db", result)}
+    trace.append(entry)
+    _collect_evidence(evidence, "query_db", args, result)
+
+    # 伪造一轮"模型发起了这次调用"的对话。格式与真实轮完全一致，后续逻辑无需分叉；
+    # 而这一步是谁发起的，靠 span 与 trace 上的 fastpath 标记如实标出，不冒充模型决策。
+    messages.append({"role": "assistant", "content": "",
+                     "tool_calls": [{"id": _FASTPATH_CALL_ID, "type": "function",
+                                     "function": {"name": "query_db",
+                                                  "arguments": json.dumps(args, ensure_ascii=False)}}]})
+    messages.append({"role": "tool", "tool_call_id": _FASTPATH_CALL_ID,
+                     "content": json.dumps(_for_model(result), ensure_ascii=False, default=str)})
+    note["applied"] = True
+    return note, result
+
+
+def _fastpath_verdict(note: dict[str, Any], fast_result: dict[str, Any] | None,
+                      evidence: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """影子档的标定结论：如果当时接管了，查到的与模型自己查的是不是同一批行。
+
+    只有这个数能回答"切 enforce 安不安全"。命中率高而一致率低，说明判据认错了题——
+    那种情况下接管会把另一个问题的答案喂给模型。
+    """
+    if not note.get("matched") or note.get("applied") or fast_result is None:
+        return note
+    first = (evidence.get("tables") or [None])[0]
+    if first is None:
+        note["agreed"] = None
+        note["agree_note"] = "模型这一轮没有查库，无从比对"
+    else:
+        note["agreed"] = fastpath.agrees(fast_result, first)
+        note["agree_note"] = "与模型首条查询%s" % ("一致" if note["agreed"] else "不一致")
+    return note
 
 
 def run_agent(question: str) -> dict[str, Any]:
@@ -321,6 +438,10 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
     ungrounded_retries = 0
 
     yield {"type": "thinking", "message": "正在判断需要查询哪些资料…"}
+
+    fast_note, fast_result = _apply_fastpath(question, messages, trace, tr, evidence, budget)
+    if fast_note.get("applied"):
+        yield {"type": "step", "step": trace[-1]}
 
     # 失败也要能被复核：把已发生的 span 连同异常一起带出去，由调用方留存链路。
     try:
@@ -428,6 +549,7 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
     except Exception as exc:
         raise AgentRunFailed(exc, {
             "question": question,
+            "fastpath": fast_note,
             "answer": "",
             "basis": [],
             "unverifiable": [],
@@ -451,6 +573,7 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
         "type": "done",
         "result": {
             "draft": draft,
+            "fastpath": _fastpath_verdict(fast_note, fast_result, evidence),
             "trace": trace,
             "evidence": evidence,
             "stop_reason": stop_reason,
@@ -519,7 +642,16 @@ def _add_doc(evidence, section: dict[str, Any]) -> None:
 def _collect_evidence(evidence, name, args, result) -> None:
     if not result.get("ok", True):
         return
-    if name == "query_db":
+    if name == "search_docs":
+        # 带回全文的那一节要进证据：模型不再需要 get_doc_section，
+        # 而依据、数据源与证据面板都是从 evidence 汇总出来的 ——
+        # 不收在这里，界面上就会出现"引用了手册、数据源里却没有手册"。
+        for hit in result.get("hits", []):
+            if hit.get("text"):
+                _add_doc(evidence, {"doc": hit.get("doc"), "section_id": hit.get("section_id"),
+                                    "title": hit.get("title"), "path": hit.get("path"),
+                                    "text": hit.get("text")})
+    elif name == "query_db":
         evidence["tables"].append({
             "sql": result.get("sql"),
             "columns": result.get("columns", []),

@@ -17,6 +17,11 @@
 两档共用同一组阈值，任何一档超了都拒绝 —— 只用覆盖判据会比改造前更松，
 只用取回判据则会把"反复引用同一条款"误判成"要把整份文档搬进去"。
 
+**合计口径拦不住"把一份文档搬空"**（2026-09-18 补）：红线说的是"整个数据库或
+文档"，而阈值的分母原来是两份文档合计。故障处理手册全文 3845 字符只占合计语料的
+59%，低于 70% 的阈值——也就是说整本手册被逐节取进上下文，护栏一声不吭。
+因此每份文档再各自设一档 ``MAX_SINGLE_DOC_RATIO``，与合计档一起判。
+
 另有一个纯展示量 ``context_chars``：工具返回真正注入上下文的字符总数（含 JSON
 结构与结论文本）。它没有分母 —— 语料占比的分子只能是语料原文，把结论文本算进去，
 分子分母就不是同一件东西了。实测一次 check_rule 返回 1260 字符，其中语料原文
@@ -27,10 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from pathlib import Path
 from typing import Any, NamedTuple
-
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 # 超过语料的这个比例即视为接近"整体载入"，拒绝继续取证。
 #
@@ -42,27 +44,63 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 MAX_ROW_RATIO = 0.5
 MAX_DOC_RATIO = 0.7
 
+# 单份文档各自的上限。**标定过，不是拍的**：拿 27 条跑测产物按去重口径复算每条链路
+# 的单文档水位，峰值 34.9%（P8「远程复位禁止情形」，规程侧 940 字符 / 2693 字符）。
+# 定在 60% 留 1.7 倍余量，正常取证不会被误伤；而"把一份文档搬空"仍然拦得住。
+MAX_SINGLE_DOC_RATIO = 0.6
+
 _totals: dict[str, int] | None = None
 _CLAUSE_KEY = re.compile(r"(\d+(?:\.\d+)*)")
 
 
-def corpus_totals() -> dict[str, int]:
-    """语料总量。只在首次调用时统计一次。"""
+def corpus_totals() -> dict[str, Any]:
+    """语料总量。只在首次调用时统计一次。
+
+    ``doc_chars_by_doc`` 按文档分开记，供单文档档判据用。文档清单直接取检索层的
+    ``DOCS``，不在这里另抄一份文件名——抄一份就会漂，而漂掉的那份是护栏的分母。
+    """
     global _totals
     if _totals is None:
         from tools.db import query_db
+        from tools.retriever import DOCS
 
         rows = 0
         for table in ("alarm_records", "maintenance_records"):
             probe = query_db("SELECT COUNT(*) AS n FROM %s" % table)
             rows += probe["rows"][0]["n"] if probe["ok"] else 0
-        chars = sum(
-            len(p.read_text(encoding="utf-8"))
-            for p in DATA_DIR.glob("*.md")
-            if p.name in ("故障处理手册.md", "海上风电机组检修作业与安全管理规程.md")
-        )
-        _totals = {"db_rows": rows, "doc_chars": chars}
+        by_doc = {key: len(path.read_text(encoding="utf-8")) for key, path in DOCS.items()}
+        _totals = {"db_rows": rows,
+                   "doc_chars": sum(by_doc.values()),
+                   "doc_chars_by_doc": by_doc}
     return _totals
+
+
+def _doc_of(unit_key: str) -> str | None:
+    """从去重键（``fault_manual:24002_SC_变流器心跳``）取出文档标识。
+
+    认不出来的键——退化路径的结果指纹、未登记工具的兜底——返回 None：它们照常
+    计入合计档，只是不参与单文档档。拿一段不知道属于哪份文档的字符去卡某一份，
+    就算拦下来也说不清是哪一份超了。
+    """
+    doc = unit_key.split(":", 1)[0]
+    return doc if doc in corpus_totals()["doc_chars_by_doc"] else None
+
+
+def _doc_label(doc: str) -> str:
+    """文档标识 → 给人看的文件名。拒绝文案里要出现的是《故障处理手册.md》。"""
+    from tools.retriever import DOC_LABELS
+
+    return DOC_LABELS.get(doc, doc)
+
+
+def _by_doc(units: tuple[tuple[str, int], ...]) -> dict[str, int]:
+    """把一次取数的各节字符数按文档归并（不去重，取回档用）。"""
+    out: dict[str, int] = {}
+    for key, chars in units:
+        doc = _doc_of(key)
+        if doc:
+            out[doc] = out.get(doc, 0) + chars
+    return out
 
 
 class Draw(NamedTuple):
@@ -98,6 +136,7 @@ class ContextBudget:
         # 取回：不去重的累计量
         self.drawn_rows = 0
         self.drawn_chars = 0
+        self._drawn_by_doc: dict[str, int] = {}
         # 展示量：工具返回实际注入上下文的字符总数
         self.context_chars = 0
         # 被红线拦下的取证：拦截前的水位 + 这一次想压到哪
@@ -105,6 +144,9 @@ class ContextBudget:
         totals = corpus_totals()
         self.max_rows = int(totals["db_rows"] * MAX_ROW_RATIO)
         self.max_chars = int(totals["doc_chars"] * MAX_DOC_RATIO)
+        # 每份文档各自一档：合计档只管"两份加起来读了多少"，管不到"某一份被搬空"
+        self.max_chars_by_doc = {key: int(chars * MAX_SINGLE_DOC_RATIO)
+                                 for key, chars in totals["doc_chars_by_doc"].items()}
 
     @property
     def db_rows(self) -> int:
@@ -116,6 +158,16 @@ class ContextBudget:
         """覆盖到的语料字符数（去重；同一节按见过的最大篇幅计）。"""
         return sum(self._units_seen.values())
 
+    @property
+    def doc_chars_by_doc(self) -> dict[str, int]:
+        """按文档分开的覆盖量（去重，与 doc_chars 同一口径）。"""
+        out: dict[str, int] = {}
+        for key, chars in self._units_seen.items():
+            doc = _doc_of(key)
+            if doc:
+                out[doc] = out.get(doc, 0) + chars
+        return out
+
     def _new_rows(self, draw: Draw) -> int:
         return len({k for k in draw.rows if k not in self._rows_seen})
 
@@ -125,6 +177,19 @@ class ContextBudget:
         for key, chars in draw.units:
             best[key] = max(best.get(key, 0), chars)
         return sum(max(0, chars - self._units_seen.get(key, 0)) for key, chars in best.items())
+
+    def _new_chars_by_doc(self, draw: Draw) -> dict[str, int]:
+        """这次取数会给每份文档各新增多少覆盖字符（已扣掉见过的部分）。"""
+        best: dict[str, int] = {}
+        for key, chars in draw.units:
+            best[key] = max(best.get(key, 0), chars)
+        out: dict[str, int] = {}
+        for key, chars in best.items():
+            doc = _doc_of(key)
+            delta = max(0, chars - self._units_seen.get(key, 0))
+            if doc and delta:
+                out[doc] = out.get(doc, 0) + delta
+        return out
 
     def would_exceed(self, draw: Draw) -> str | None:
         """预检。返回拒绝原因，或 None 表示放行。
@@ -158,6 +223,23 @@ class ContextBudget:
                     "请只取回确实需要引用的章节，已经拿到的不要再取第二次。"
                     % (sum(c for _, c in draw.units), self.drawn_chars, self.max_chars,
                        totals["doc_chars"]))
+        # 单文档档：合计还有余量，不代表某一份没被搬空。
+        #
+        # **只判覆盖档，不判取回档**（2026-09-18 定，26 条跑测标定后改）：先前两档都判，
+        # 26 条里误伤 3 次（X2 两次、P8 一次），全部出在取回侧——`check_rule` 的通则调用
+        # 会内联同一批条款原文，问一个合规问题连调两次，累计取回就顶到 1615 字符上限，
+        # 而去重后其实只读了规程的三分之一。红线问的是"整份文档是不是被搬进去了"，
+        # 这本身就是去重口径的问题；重复取回该由合计取回档去兜，不该在这一档上重复计。
+        seen_by_doc = self.doc_chars_by_doc
+        for doc, new_chars in self._new_chars_by_doc(draw).items():
+            limit = self.max_chars_by_doc.get(doc)
+            seen = seen_by_doc.get(doc, 0)
+            if limit and seen + new_chars > limit:
+                return ("本次取回会让《%s》这一份文档超过上限（本次引入 %d 字符，"
+                        "该文档已覆盖 %d/%d 字符，全文共 %d 字符）。"
+                        "系统不允许把整份文档载入上下文，请只取回确实需要引用的章节。"
+                        % (_doc_label(doc), new_chars, seen, limit,
+                           totals["doc_chars_by_doc"][doc]))
         return None
 
     def note_refusal(self, draw: Draw, reason: str) -> None:
@@ -176,17 +258,27 @@ class ContextBudget:
         chars = max(self.doc_chars + self._new_chars(draw),
                     self.drawn_chars + sum(c for _, c in draw.units))
         pct = lambda num, den: round(num / den * 100, 1) if den else 0.0  # noqa: E731
+        # 单文档侧同理：被拒的那次不进账，只看已计费的量，这一档也永远画不出撞线
+        # 单文档档判的是覆盖，这里记的也只能是覆盖 —— 判据用一个口径、台账用另一个，
+        # 看板上就会出现"试图压到 78%"而阈值是按另一个数算的，对不上账
+        seen_by_doc = self.doc_chars_by_doc
+        new_by_doc = self._new_chars_by_doc(draw)
+        single = [pct(seen_by_doc.get(doc, 0) + new_chars, totals["doc_chars_by_doc"][doc])
+                  for doc, new_chars in new_by_doc.items()]
         self.refusals.append({
             "reason": reason,
             "attempt_db_rows": rows,
             "attempt_doc_chars": chars,
             "attempt_db_rows_pct": pct(rows, totals["db_rows"]),
             "attempt_doc_chars_pct": pct(chars, totals["doc_chars"]),
+            "attempt_single_doc_pct": max(single) if single else None,
         })
 
     def charge(self, draw: Draw) -> None:
         self.drawn_rows += len(draw.rows)
         self.drawn_chars += sum(c for _, c in draw.units)
+        for doc, chars in _by_doc(draw.units).items():
+            self._drawn_by_doc[doc] = self._drawn_by_doc.get(doc, 0) + chars
         self.context_chars += draw.context_chars
         self._rows_seen.update(draw.rows)
         for key, chars in draw.units:
@@ -208,14 +300,33 @@ class ContextBudget:
             "doc_chars_drawn": self.drawn_chars,
             # 工具返回真正注入上下文的字符总数（含 JSON 结构与结论文本，无分母）
             "context_chars": self.context_chars,
+            # 单文档档：红线说的"整份文档"，只有这一档答得上
+            "doc_chars_by_doc": [
+                {"doc": doc,
+                 "label": _doc_label(doc),
+                 "chars": self.doc_chars_by_doc.get(doc, 0),
+                 "chars_drawn": self._drawn_by_doc.get(doc, 0),
+                 "total": total,
+                 "pct": pct(self.doc_chars_by_doc.get(doc, 0), total),
+                 "limit": self.max_chars_by_doc.get(doc)}
+                for doc, total in sorted(corpus_totals()["doc_chars_by_doc"].items())
+            ],
+            "peak_single_doc_pct": max(
+                (pct(self.doc_chars_by_doc.get(doc, 0), total)
+                 for doc, total in corpus_totals()["doc_chars_by_doc"].items()),
+                default=None),
             "limit_rows": self.max_rows,
             "limit_chars": self.max_chars,
+            "limit_single_doc_pct": round(MAX_SINGLE_DOC_RATIO * 100, 1),
             # 护栏拦截台账：没有拦截过就是 None，不是 0 —— 界面据此决定要不要出现这一行
             "refusals": len(self.refusals),
             "peak_attempt_db_rows_pct": max((r["attempt_db_rows_pct"] for r in self.refusals),
                                             default=None),
             "peak_attempt_doc_chars_pct": max((r["attempt_doc_chars_pct"] for r in self.refusals),
                                               default=None),
+            "peak_attempt_single_doc_pct": max(
+                (r["attempt_single_doc_pct"] for r in self.refusals
+                 if r.get("attempt_single_doc_pct") is not None), default=None),
         }
 
 
@@ -249,11 +360,17 @@ def _m_get_doc_section(result: dict[str, Any]) -> Draw:
 
 
 def _m_search_docs(result: dict[str, Any]) -> Draw:
+    """按实际注入的篇幅计量。
+
+    top-1 命中无悬念时检索结果里直接带全文（见 retriever.Index.inline_target），
+    那一节进上下文的就是整节原文而不是 160 字摘要。仍按摘要计，会凭空漏掉
+    一节的量 —— 而漏计的正是护栏要拦的那一侧。
+    """
     units = []
     for hit in result.get("hits", []):
         key = "%s:%s" % (hit.get("doc_key") or hit.get("doc") or "?",
                          hit.get("section_id") or "?")
-        units.append((key, len(hit.get("snippet") or "")))
+        units.append((key, max(len(hit.get("text") or ""), len(hit.get("snippet") or ""))))
     return Draw(units=tuple(units))
 
 

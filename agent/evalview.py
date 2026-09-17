@@ -24,11 +24,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agent.composer import detect_sources  # noqa: E402
+from agent.tracing import (  # noqa: E402
+    answer_ms, answer_share_pct, latency_buckets, p95 as _p95,
+)
 from eval.verdict import SUITES, check  # noqa: E402
-from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO  # noqa: E402
+from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO, MAX_SINGLE_DOC_RATIO  # noqa: E402
 
 OUT_DIR = ROOT / "eval" / "out"
 EVAL_DIR = ROOT / "eval"
+
+# 产物搭出来的链路用这个前缀作 id，与留存里的整数 id 区分开
+TRACE_PREFIX = "eval:"
 
 # 指标快照的流水账。**扩展名必须不是 .json**：load() 用 glob("*.json") 扫产物，
 # 叫 _history.json 会被当成一条用例产物解析。
@@ -69,13 +75,86 @@ def judge(case: dict[str, Any], result: dict[str, Any]) -> tuple[bool, list[str]
     return check(case, result)
 
 
-def persist(case: dict[str, Any], result: dict[str, Any]) -> None:
-    """把本次结果落盘，与 eval/run.py 的产物格式一致，便于页面刷新后仍可见。"""
+def persist(case: dict[str, Any], result: dict[str, Any],
+            trace_id: int | None = None) -> None:
+    """把本次结果落盘，与 eval/run.py 的产物格式一致，便于页面刷新后仍可见。
+
+    trace_id 记的是这次跑测在链路留存里的编号。离线评测那张表点一行要跳到
+    链路追踪，有它就能直接定位到**同一次运行**那条活链路；没有（命令行跑的、
+    或已被挤出留存）才回退到用产物现搭一条，见 trace_records()。
+    """
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     payload = {"case": {k: v for k, v in case.items() if not k.startswith("_")},
-               "suite": case.get("_suite"), "result": result}
+               "suite": case.get("_suite"), "trace_id": trace_id, "result": result}
     (OUT_DIR / ("%s.json" % case["id"])).write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _trace_record(item: dict[str, Any]) -> dict[str, Any]:
+    """把一条 load() 出来的用例摊成链路记录的形状。
+
+    字段名与 tracestore 保持一致，追踪页那套渲染才用得上——那边已经能画
+    pipeline、span 表、护栏徽标，这里再抄一份只会两处走样。
+    """
+    from agent.tracestore import _diagnose
+
+    spans = item.get("spans") or []
+    status, notes = _diagnose(spans, {"stop_reason": item.get("stop_reason"),
+                                      "steps": item.get("steps")})
+    answer = item.get("answer") or ""
+    return {
+        "id": TRACE_PREFIX + item["id"],
+        # 短 id 直接用用例编号：这批链路本来就是按用例编号找的，
+        # 给个随机十六进制串反而要多认一层
+        "short_id": item["id"],
+        "at": datetime.fromtimestamp(item["at_ts"]).strftime("%m-%d %H:%M:%S"),
+        "at_ts": item["at_ts"],
+        "status": status,
+        "notes": notes,
+        "question": item.get("question") or "",
+        "source": "eval",
+        "replay": False,
+        "from_artifact": True,
+        "case_id": item["id"],
+        # 同一次运行如果还留在内存里，追踪页该用留存那条（更全），这里只负责
+        # 把编号带出去供去重，见 admin._merged_traces
+        "trace_id_in_store": item.get("trace_id"),
+        "model": item.get("model"),
+        "elapsed_ms": item.get("elapsed_ms"),
+        "stop_reason": item.get("stop_reason"),
+        "steps": item.get("steps"),
+        "served_ms": None,
+        "price_basis": {},
+        "grounding": {"mode": item.get("grounding")} if item.get("grounding") else {},
+        "fastpath": item.get("fastpath") or {},
+        "format_parsed": None,
+        "budget": {"db_rows_pct": item.get("db_rows_pct"),
+                   "doc_chars_pct": item.get("doc_chars_pct"),
+                   "peak_single_doc_pct": item.get("single_doc_pct")},
+        "sources": item.get("sources") or [],
+        "answer": answer,
+        "unverifiable": item.get("unverifiable") or [],
+        "spans": spans,
+        "summary": {"tool_calls": item.get("tool_calls"),
+                    "tool_failures": item.get("tool_failures"),
+                    "tool_refused": item.get("tool_refused"),
+                    "model_calls": item.get("model_calls"),
+                    "cost_cny": item.get("cost_cny"),
+                    "cached_tokens": item.get("cached_tokens")},
+    }
+
+
+def trace_records() -> dict[str, dict[str, Any]]:
+    """把 eval 产物整批转成链路记录，按 id 索引。
+
+    链路留存是**进程内**的：命令行 `python eval/run.py` 跑出的产物根本没有对应
+    链路，后台「运行全部」跑出来的也会被后续记录挤出（上限 50 条），一重启更是
+    全没。而离线评测那张表点一行就要跳到链路追踪定位到该条 —— 指不着就等于
+    这个跳转在最常见的情形下是坏的。
+
+    产物里本来就存着 spans / meta / trace_summary，缺的只是一层形状转换。
+    """
+    return {r["id"]: r for r in (_trace_record(it) for it in load()["items"])}
 
 
 def snapshot(ran: int | None = None) -> dict[str, Any]:
@@ -162,6 +241,10 @@ def load() -> dict[str, Any]:
         ts = result.get("trace_summary") or {}
         items.append({
             "id": cid,
+            # 点这一行要跳到链路追踪。优先指向同一次运行留在内存里的那条；
+            # 留存是进程内的，指不着时用 eval:<id> 让追踪页拿产物现搭一条。
+            "trace_id": blob.get("trace_id"),
+            "trace_ref": TRACE_PREFIX + cid,
             "suite": _suite_of(cid, blob.get("suite") or spec.get("_suite")),
             "question": spec.get("question") or stored_case.get("question", ""),
             "probe": spec.get("probe"),
@@ -172,6 +255,11 @@ def load() -> dict[str, Any]:
             "stop_reason": meta.get("stop_reason"),
             "db_rows_pct": budget.get("db_rows_pct"),
             "doc_chars_pct": budget.get("doc_chars_pct"),
+            # 单文档档是 2026-09-18 才加的：这一天之前落盘的产物里没有这个字段。
+            # 缺失就是缺失，None 会让界面整格不出现——补成 0 会被读成"一份都没读到"。
+            "fastpath": meta.get("fastpath") or {},
+            "single_doc_pct": budget.get("peak_single_doc_pct"),
+            "attempt_single_doc_pct": budget.get("peak_attempt_single_doc_pct"),
             "sources": result.get("sources", []),
             "model": meta.get("model"),
             "grounding": (meta.get("grounding") or {}).get("mode"),
@@ -231,6 +319,19 @@ def load() -> dict[str, Any]:
 
     pcts_row = [i["db_rows_pct"] for i in items if i["db_rows_pct"] is not None]
     pcts_doc = [i["doc_chars_pct"] for i in items if i["doc_chars_pct"] is not None]
+    fps = [i.get("fastpath") or {} for i in items]
+    fp_judged = [f for f in fps if f.get("agreed") is not None]
+    fastpath = {
+        "mode": "、".join(sorted({f["mode"] for f in fps if f.get("mode")})) or None,
+        "matched": sum(1 for f in fps if f.get("matched")),
+        "applied": sum(1 for f in fps if f.get("applied")),
+        "compared": len(fp_judged),
+        "agreed": sum(1 for f in fp_judged if f.get("agreed")),
+        "total": len(items),
+    }
+    pcts_one = [i["single_doc_pct"] for i in items if i.get("single_doc_pct") is not None]
+    att_one = [i["attempt_single_doc_pct"] for i in items
+               if i.get("attempt_single_doc_pct") is not None]
     return {
         "items": items,
         "summary": summary,
@@ -245,6 +346,12 @@ def load() -> dict[str, Any]:
             # 红线画在哪跟着护栏的阈值走，不在前端另写一份
             "limit_row_pct": round(MAX_ROW_RATIO * 100, 1),
             "limit_doc_pct": round(MAX_DOC_RATIO * 100, 1),
+            "peak_single_doc_pct": max(pcts_one) if pcts_one else None,
+            "peak_attempt_single_doc_pct": max(att_one) if att_one else None,
+            "limit_single_doc_pct": round(MAX_SINGLE_DOC_RATIO * 100, 1),
+            # 这一档之前落盘的产物里没有单文档水位，整格不画比画一个 0% 诚实
+            "single_doc_samples": len(pcts_one),
+            "fastpath": fastpath,
         },
     }
 
@@ -253,13 +360,10 @@ def _pct(num: int, den: int) -> float | None:
     return round(num / den * 100, 1) if den else None
 
 
-def _p95(values: list[int]) -> int | None:
-    """P95。样本很少时按最接近的序位取，不做插值——26 条样本上插值是假精度。"""
-    if not values:
-        return None
-    ordered = sorted(values)
-    idx = min(len(ordered) - 1, int(round(0.95 * (len(ordered) - 1))))
-    return ordered[idx]
+# P95 与耗时构成用与线上档同一份实现（agent.tracing）。
+# 两处各写一份的后果已经发生过：这里原先用 round(0.95 * (n - 1))，n=39 时把最慢的
+# 两条整个排除在外，而线上档的注释早已把这个写法判为偏乐观 —— 同一个「P95 端到端
+# 耗时」在两个页面上算出不同的数，谁也说不清该信哪个。
 
 
 def metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -300,6 +404,10 @@ def metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
     tj = tc - tr_
 
     lat = [i["elapsed_ms"] for i in items if i.get("elapsed_ms")]
+    timed = [i for i in items if i.get("elapsed_ms")]
+    buckets = latency_buckets([(i.get("tool_calls") or 0, i["elapsed_ms"]) for i in timed])
+    share = answer_share_pct([(answer_ms(i.get("spans") or []), i["elapsed_ms"])
+                              for i in timed])
     toks = [i["tokens"] for i in items if i.get("tokens")]
     costs = [i["cost_cny"] for i in items if i.get("cost_cny") is not None]
 
@@ -317,7 +425,11 @@ def metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
                                  normal, n, "· 其中 %d 条链路内有降级或工具失败" % rough if rough else "")},
         "p95_latency_ms": {"value": _p95(lat),
                            "note": ("P50 %.1fs · 样本 %d" % (statistics.median(lat) / 1000, len(lat)))
-                                   if lat else "无数据"},
+                                   if lat else "无数据",
+                           # 混算的分位数描述的是题目难度分布；按工具调用次数分桶，
+                           # 才看得出优化动的是哪一类题
+                           "buckets": buckets,
+                           "answer_share_pct": share},
         "avg_tokens": {"value": round(statistics.mean(toks)) if toks else None,
                        "note": ("缓存命中均值 %d" % round(statistics.mean(
                            [i.get("cached_tokens") or 0 for i in items]))) if toks else "无数据"},

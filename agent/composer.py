@@ -4,6 +4,15 @@
 刻意不再多调一次 LLM 做结构化：模型按固定三段标题输出，这里用确定性解析拆开。
 更重要的是——evidence 和 sources 都由代码从**真实发生过的工具调用**汇总，
 不经过模型转述，所以「依据展示」在结构上就不可能被编造。
+
+**「依据」也由代码渲染**（2026-09-18 改）：这一段原先由模型复述一遍，约 300 字符。
+实测生成速率 84~110 字符/秒，光这一段就是 3~4 秒，占端到端的一成有余。而它复述的
+恰恰是 evidence 里已有的东西——规则判定的 verdict 是规则引擎算出来的原话，SQL 与
+命中行数是执行结果，条款号来自真实取回的章节。让模型再说一遍，既花时间，又多一次
+转述漂移的机会。改由代码从 evidence 渲染后，这一段与执行轨迹在结构上完全一致。
+
+模型仍然写「结论」与「现有资料无法确认」两段：前者是要回答的问题本身，后者需要
+判断"资料里到底有没有"，都不是代码能替它做的。
 """
 from __future__ import annotations
 
@@ -36,6 +45,20 @@ DOC_KEYS = {
 }
 _TABLES = ("alarm_records", "maintenance_records")
 _CLAUSE_ID = re.compile(r"^\d+(?:\.\d+)?$")
+
+# 依据行里回显查询条件用。取 WHERE 到下一个子句之间那段——空结果时，
+# "查了什么条件没查到"比"没查到"有用得多。
+_WHERE = re.compile(r"\bwhere\b(.*?)(?=\border\s+by\b|\bgroup\s+by\b|\blimit\b|$)",
+                    re.I | re.S)
+# 行里用来指认"这批是谁的数据"的列，按这个顺序取
+_ID_COLUMNS = ("turbine_id", "fault_code", "work_order_id")
+# 依据段的行数上限。证据面板里是全量，这里是摘要；超出要**说出来**，
+# 不能静默截断——截断后看上去就像"依据只有这几条"。
+BASIS_MAX_LINES = 6
+# 单行上限。规则 verdict 最长的一条有 400 多字符（关单合规逐项核对），
+# 整条摊进依据段就没法一眼扫完；全文在证据面板里点得开，这里按句截。
+BASIS_LINE_CHARS = 110
+_SENTENCE_END = re.compile(r"[。；;！!？?\n]")
 
 
 def _split_sections(text: str) -> dict[str, str]:
@@ -120,6 +143,121 @@ def detect_sources(evidence: dict[str, Any]) -> list[str]:
     return found
 
 
+def _clip(text: str, limit: int = BASIS_LINE_CHARS) -> str:
+    """按句截断，截不到句末再硬截。省略号是给人看的信号，不是装饰。"""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cuts = [m.end() for m in _SENTENCE_END.finditer(text[:limit]) if m.end() > limit * 0.4]
+    return (text[:cuts[-1]] if cuts else text[:limit]) + "…"
+
+
+def _table_of(sql: str) -> str | None:
+    low = (sql or "").lower()
+    return next((t for t in _TABLES if t in low), None)
+
+
+def _condition(sql: str) -> str:
+    match = _WHERE.search(sql or "")
+    if not match:
+        return ""
+    cond = " ".join(match.group(1).split())
+    return cond[:58] + "…" if len(cond) > 58 else cond
+
+
+def _table_basis(entry: dict[str, Any]) -> str:
+    sql = entry.get("sql") or ""
+    rows = entry.get("rows") or []
+    count = entry.get("row_count", len(rows))
+    head = "`%s`" % (_table_of(sql) or "数据表")
+    cond = _condition(sql)
+    if cond:
+        head += "：WHERE %s" % cond
+    if not count:
+        return head + " → 无匹配记录"
+    columns = entry.get("columns") or (list(rows[0]) if rows else [])
+    # 聚合查询（COUNT / MAX）的单格结果直接给数：这才是它被查出来的原因
+    if count == 1 and len(columns) == 1 and rows:
+        return "%s → %s = %s" % (head, columns[0], rows[0].get(columns[0]))
+    marks = []
+    for col in _ID_COLUMNS:
+        seen: list[str] = []
+        for row in rows:
+            value = row.get(col)
+            if value is not None and str(value) not in seen:
+                seen.append(str(value))
+        if seen:
+            marks.append("、".join(seen[:3]) + ("…" if len(seen) > 3 else ""))
+    return "%s → 命中 %d 行%s" % (head, count, "（%s）" % " / ".join(marks) if marks else "")
+
+
+def _doc_basis(section: dict[str, Any]) -> str:
+    title = section.get("title") or section.get("section_id") or ""
+    body = [line.strip() for line in (section.get("text") or "").splitlines()
+            if line.strip() and not line.strip().startswith("#")]
+    point = _SENTENCE_END.split(body[0])[0].strip() if body else ""
+    if len(point) > 40:
+        point = point[:40] + "…"
+    return "《%s》%s%s" % (section.get("doc", ""), title, "：%s" % point if point else "")
+
+
+def _rule_basis(entry: dict[str, Any]) -> str | None:
+    """规则判定这一行直接用 verdict 原话。
+
+    它是规则引擎按条款算出来的结论，不是模型的转述——让模型复述一遍，只会在
+    「4 次」「3 次门限」这种数字上多一次出错的机会。
+    """
+    result = entry.get("result") or {}
+    verdict = (result.get("verdict") or "").strip()
+    if not verdict:
+        return None
+    clauses = result.get("clauses") or []
+    prefix = "第 %s 条 · " % "、".join(sorted(clauses, key=_clause_key)) if clauses else ""
+    return prefix + _clip(verdict)
+
+
+def render_basis(evidence: dict[str, Any]) -> list[str]:
+    """从真实发生过的工具调用渲染「依据」。
+
+    顺序是**按信息量**排的，不是按调用顺序：规则判定带着结论与条款号，信息量最大；
+    其次是查库拿到的事实；最后是引用到的章节。超过上限的不静默丢掉，最后一行明说
+    还有多少项——证据面板里是全量，但读依据的人未必会往下翻。
+    """
+    lines: list[str] = []
+    covered_clauses: set[str] = set()
+
+    for entry in evidence.get("rules", []) or []:
+        line = _rule_basis(entry)
+        result = entry.get("result") or {}
+        if line:
+            lines.append(line)
+        # 通则调用（没传 id）的 verdict 只是一句"未针对具体对象作出判定"的说明，
+        # 真正的依据是那几条条款原文本身 —— 这种情况不能把条款行压掉，
+        # 压掉后依据里就只剩一句免责声明。
+        if not result.get("is_general"):
+            covered_clauses.update(result.get("clauses") or ())
+
+    for entry in evidence.get("tables", []) or []:
+        lines.append(_table_basis(entry))
+
+    for section in evidence.get("docs", []) or []:
+        # 规则已经内联过的条款不再单列：同一条款在依据里出现两次，读的人会以为是两项证据
+        if (DOC_KEYS.get(section.get("doc")) == "safety_regulation"
+                and str(section.get("section_id") or "") in covered_clauses):
+            continue
+        lines.append(_doc_basis(section))
+
+    # 同一条 SQL 被查两次、同一节被两条路径带出来时，渲染出的文字会完全相同
+    unique: list[str] = []
+    for line in lines:
+        if line not in unique:
+            unique.append(line)
+    if len(unique) <= BASIS_MAX_LINES:
+        return unique
+    return unique[:BASIS_MAX_LINES] + [
+        "（另有 %d 项依据，见下方证据面板）" % (len(unique) - BASIS_MAX_LINES)]
+
+
 def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
     draft = run.get("draft") or ""
     parts = _split_sections(draft)
@@ -130,10 +268,13 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
         unverifiable = []
 
     evidence = run.get("evidence", {})
+    # 依据由代码从证据渲染。渲染不出东西时（未取证拒答、或复放 2026-09-18 之前的
+    # 老链路）才回落到模型写的那一段——回落也要有东西可回落，不能整段空掉。
+    basis = render_basis(evidence) or _as_items(parts.get(H_BASIS, ""))
     return {
         "question": question,
         "answer": parts.get(H_CONCLUSION, "").strip() or draft.strip(),
-        "basis": _as_items(parts.get(H_BASIS, "")),
+        "basis": basis,
         "unverifiable": unverifiable,
         # 把规则判定转成现场核实清单：同一份数据，从「我不知道」变成「你要去办的几件事」
         "checklists": build_checklists(evidence),
@@ -152,6 +293,8 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
             # 本次会话实际进入上下文的语料占比，供界面展示与事后审计
             "budget": run.get("budget"),
             "model": run.get("model"),
+            # 快路径：认没认出来、接没接管、影子档下与模型自己查的是否一致
+            "fastpath": run.get("fastpath") or {},
             # 成本是按核对过的官方单价算的，还是落到兜底价的估算
             "price_basis": price_basis(run.get("model") or ""),
         },

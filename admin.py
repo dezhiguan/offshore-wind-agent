@@ -92,10 +92,12 @@ def eval_run(req: RunRequest) -> StreamingResponse:
                 t0 = time.monotonic()
                 result = stamp_served(
                     grounding.apply(compose(case["question"], run_agent(case["question"]))), t0)
-                # 标成 eval：链路追踪页照样看得到，但线上质量的分母里不能有它
-                tracestore.record(case["question"], result, source="eval")
+                # 标成 eval：链路追踪页照样看得到，但线上质量的分母里不能有它。
+                # 编号随产物一起落盘 —— 离线评测那张表点一行要跳到链路追踪，
+                # 有它才能定位到**同一次运行**留下的那条活链路。
+                trace_id = tracestore.record(case["question"], result, source="eval")
                 ok, problems = evalview.judge(case, result)
-                evalview.persist(case, result)
+                evalview.persist(case, result, trace_id=trace_id)
             except AgentRunFailed as exc:
                 # 跑挂的用例同样留一条链路，成功率与用例结果才对得上
                 tracestore.record(case["question"], exc.partial, source="eval", error=str(exc.cause))
@@ -120,18 +122,56 @@ def eval_run(req: RunRequest) -> StreamingResponse:
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+_LIST_ONLY = ("spans", "answer", "unverifiable")
+
+
+def _as_list_row(record: dict) -> dict:
+    """与 tracestore.listing() 同一套剥字段口径，产物搭出来的那批也要照办。"""
+    return dict({k: v for k, v in record.items() if k not in _LIST_ONLY},
+                unverifiable_count=len(record.get("unverifiable") or []),
+                answered=bool((record.get("answer") or "").strip())
+                         and record.get("stop_reason") != "refused_ungrounded")
+
+
+def _merged_traces() -> tuple[list[dict], int]:
+    """留存的链路 + 产物搭出来的回归链路，按时间倒序合成一个列表。
+
+    离线评测的每条用例都必须能在这一页找得到，否则那张表上的跳转在最常见的
+    情形下就是坏的：留存是进程内的，命令行跑出的产物没有链路，后台跑的也会被
+    挤出或随重启消失。同一次运行两边都有时以留存那条为准（它更全，含
+    served_ms、格式解析、计价口径），靠产物里记下的 trace_id 去重。
+    """
+    live = tracestore.listing()
+    live_ids = {t["id"] for t in live}
+    extra = [_as_list_row(r) for rid, r in evalview.trace_records().items()
+             if r.get("trace_id_in_store") not in live_ids]
+    merged = sorted(live + extra, key=lambda t: t.get("at_ts") or 0, reverse=True)
+    return merged, len(extra)
+
+
 @admin_router.get("/api/traces")
 def traces(response: Response) -> dict:
     """链路留存列表与聚合统计。进程内保留最近 N 条，不落库。
 
     这里**不分来源**：线上问答与回归跑测的链路都要能逐段复核，
     列表上按来源打标即可。做口径区分的是 /api/quality/online。
+
+    列表里另掺了离线评测的产物（见 _merged_traces），但**统计口径不掺**：
+    stats 仍然只算留存，否则"留存 N / 50"这个容量表述立刻失真。
     """
     response.headers["Cache-Control"] = "no-store"
-    return {"stats": tracestore.stats(), "items": tracestore.listing()}
+    items, from_artifact = _merged_traces()
+    return {"stats": tracestore.stats(), "items": items, "from_artifact": from_artifact}
 
 
 @admin_router.get("/api/traces/{trace_id}")
-def trace_detail(trace_id: int) -> dict:
-    item = tracestore.get(trace_id)
+def trace_detail(trace_id: str) -> dict:
+    """id 是整数就查留存，带 eval: 前缀就拿产物现搭一条。"""
+    if trace_id.startswith(evalview.TRACE_PREFIX):
+        item = evalview.trace_records().get(trace_id)
+        return item or {"error": "没有找到用例 %s 的评测产物。" %
+                                 trace_id[len(evalview.TRACE_PREFIX):]}
+    if not trace_id.lstrip("-").isdigit():
+        return {"error": "链路编号 %r 格式不正确。" % trace_id}
+    item = tracestore.get(int(trace_id))
     return item or {"error": "该链路不存在或已被新记录挤出（仅保留最近 %d 条）" % tracestore.MAX_TRACES}

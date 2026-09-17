@@ -21,6 +21,8 @@ span 分五类，与它和模型的关系对应：
 """
 from __future__ import annotations
 
+import math
+import statistics
 import time
 from typing import Any
 
@@ -128,3 +130,70 @@ class Trace:
 
     def as_list(self) -> list[dict[str, Any]]:
         return [s.as_dict(i + 1) for i, s in enumerate(self.spans)]
+
+
+# ---- 耗时构成 ----
+#
+# 这几个函数由线上档（tracestore）与离线档（evalview）共用。两处各写一份，
+# 同一个「P95 端到端耗时」就会在两个页面上算出不同的数 —— 而这正是已经发生过的：
+# 离线档原先用 round(0.95 * (n - 1))，线上档的注释里已经把这个写法判为偏乐观。
+
+# 不发起工具调用、只把答案写出来的那次模型调用。名字由 _call / _force_answer 决定。
+ANSWER_SPANS = ("答案成文", "步数用尽收口")
+
+# 按工具调用次数分桶。混在一起算分位数，得到的是**题目难度的分布**而不是系统性能：
+# 一步就能答的题和要查六步的题放进同一个 P95，优化做没做出来会被题目组合的波动盖掉。
+TOOL_BUCKETS = ("1 步", "2-3 步", "4 步以上")
+
+
+def answer_ms(spans: list[dict[str, Any]]) -> int | None:
+    """最后一次「写答案」的模型调用耗时。
+
+    实测这一段是端到端耗时的大头（约 69%，见 设计说明 3.14）：它按字符数线性增长，
+    而决策轮只有一两秒。把它单独摘出来，"这条链路慢在哪"才不用逐段去点。
+    """
+    ms = [s.get("elapsed_ms") or 0 for s in spans
+          if s.get("kind") == "MODEL" and s.get("name") in ANSWER_SPANS]
+    return ms[-1] if ms else None
+
+
+def p95(values: list[int]) -> int | None:
+    """最近秩（nearest-rank）：至少 95% 的样本不超过它。
+
+    不用 ``round(0.95 * (n - 1))``——n=39 时它落在第 37 位，把最慢的两条整个排除，
+    报出来的数比真实的第 95 百分位低一截。延迟指标宁可偏保守也不能偏乐观：
+    偏乐观的那一版，恰恰在最该示警的时候最好看。
+    """
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[math.ceil(0.95 * len(ordered)) - 1]
+
+
+def tool_bucket(calls: int) -> str:
+    return TOOL_BUCKETS[0] if calls <= 1 else TOOL_BUCKETS[1] if calls <= 3 else TOOL_BUCKETS[2]
+
+
+def latency_buckets(samples: list[tuple[int, int]]) -> list[dict[str, Any]]:
+    """按工具调用次数分桶的耗时分布。samples 为 (工具调用次数, 端到端毫秒)。"""
+    grouped: dict[str, list[int]] = {}
+    for calls, ms in samples:
+        if ms:
+            grouped.setdefault(tool_bucket(calls or 0), []).append(ms)
+    out = []
+    for bucket in TOOL_BUCKETS:
+        values = grouped.get(bucket)
+        if values:
+            out.append({"bucket": bucket, "count": len(values),
+                        "p50_ms": int(statistics.median(values)), "p95_ms": p95(values)})
+    return out
+
+
+def answer_share_pct(samples: list[tuple[int | None, int | None]]) -> float | None:
+    """成文耗时占端到端的比例（中位数）。samples 为 (成文毫秒, 端到端毫秒)。
+
+    取中位数不取均值：一条超时链路的比例会趋近于 0（时间全花在重试上），
+    均值会被它拽下来，看起来像"成文不是瓶颈了"。
+    """
+    shares = [100 * a / t for a, t in samples if a and t]
+    return round(statistics.median(shares), 1) if shares else None
