@@ -208,6 +208,16 @@ def repeat_fault(turbine_id: str, fault_code: str,
 
 # ---------------------------------------------------------------- 2 应有优先级
 
+def _merge_clauses(*groups) -> list[str]:
+    """按出现顺序合并条款号并去重。"""
+    merged: list[str] = []
+    for group in groups:
+        for clause in group or ():
+            if clause not in merged:
+                merged.append(clause)
+    return merged
+
+
 def _is_safety_chain(alarms: list[dict[str, Any]], manual: str) -> bool:
     """急停/安全链故障，按告警名称与手册原文判定，不硬编码故障码。"""
     names = " ".join(a.get("fault_name") or "" for a in alarms)
@@ -256,6 +266,15 @@ def priority_required(turbine_id: str, fault_code: str) -> dict[str, Any]:
     elif not current:
         verdict += " 数据库中尚无对应工单，应按该优先级建单。"
 
+    # 安全链一旦成立，第 4.1 条第 1 款同时成立 —— 条款直接规定，不是"可能相关"。
+    # 原先这句要等模型自己想起来再调一次 remote_reset_ban 才会出现：实测同一道题
+    # 两次问，一次援引到第 4.1 条、一次没有，而"急停禁止远程复位"恰恰是这类问题
+    # 最不该看模型发挥的那一条。
+    clauses = [clause, "2.4"] + (["3.2"] if repeat["is_repeat_fault"] else [])
+    if safety_chain:
+        verdict += " 该类故障禁止远程强制复位（第 4.1 条第 1 款），应安排现场安全检查。"
+        clauses.append("4.1")
+
     return {
         "ok": True, "rule": "priority_required", "required_priority": required,
         "verdict": verdict,
@@ -263,7 +282,7 @@ def priority_required(turbine_id: str, fault_code: str) -> dict[str, Any]:
                   "是否重复故障": repeat["is_repeat_fault"],
                   "最大24小时窗口次数": repeat["facts"]["最大连续24小时窗口内次数"],
                   "现有工单": current},
-        "unverifiable": [], "clauses": [clause, "2.4"] + (["3.2"] if repeat["is_repeat_fault"] else []),
+        "unverifiable": [], "clauses": clauses,
     }
 
 
@@ -319,7 +338,9 @@ def work_order_assessment(turbine_id: str, fault_code: str) -> dict[str, Any]:
         "ok": True, "rule": "work_order_assessment", "has_work_order": True,
         "verdict": verdict, "facts": {"工单": items},
         "unverifiable": ["备件的实物库存、预留、型号兼容与现场领用状态（第 7.1 条：字段已简化）"],
-        "clauses": ["2.4", "7.1", "7.2"],
+        # ① 优先级那一项整个来自 priority_required，它援引到的条款同样是本次判定的依据。
+        # 只调了 work_order_assessment 的那一轮，第 2.1 / 4.1 条不该因为"隔了一层函数"就消失。
+        "clauses": _merge_clauses(["2.4", "7.1", "7.2"], expected.get("clauses")),
     }
 
 
