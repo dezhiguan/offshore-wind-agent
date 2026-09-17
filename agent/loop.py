@@ -29,7 +29,7 @@ from agent.tools_spec import TOOLS, TOOL_REGISTRY
 from agent.tracing import DEGRADED, ERROR, OK, TOOL_KIND, Trace
 from tools.budget import ContextBudget, measure
 from tools.pricing import cost as price_of
-from tools.rules import clause_sections
+from tools.rules import cited_sections
 
 # span 明细里「详情」展开的单侧上限。取回的文档节可达数千字，
 # 50 条留存乘上去会把内存吃掉，超出就截断并标出来，不假装是全文。
@@ -197,6 +197,19 @@ def _usage_of(model: str, usage: Any) -> dict[str, Any]:
             "cost_cny": round(price_of(model, pt, ct, cached), 6)}
 
 
+def _for_model(result: dict[str, Any]) -> dict[str, Any]:
+    """发给模型的那一份：剥掉 `_audit_` 开头的键。
+
+    留痕和喂模型是两件事。规则引擎内部发的 SQL 要进 span 供审计复现，但发给模型
+    毫无用处 —— 它已经拿到结论和 facts 了，多出来的 SQL 只是烧 token，还会把
+    护栏的上下文水位抬高。
+
+    这条边界原本靠"记得别回写 result"的口头纪律守（见 _collect_evidence 里那段
+    注释），加一条就得记一次。改成按前缀剥离，新增审计字段时自动生效。
+    """
+    return {k: v for k, v in result.items() if not k.startswith("_audit_")}
+
+
 def _detail(obj: Any) -> str:
     """span 详情：完整的输入/输出参数，供后台展开查看。"""
     text = json.dumps(obj, ensure_ascii=False, indent=2, default=str)
@@ -254,7 +267,16 @@ def _summarize(name: str, result: dict[str, Any]) -> str:
         return "命中 %d 行" % n if n else "无匹配记录"
     if name == "search_docs":
         hits = result.get("hits", [])
-        return "命中 %d 节：%s" % (len(hits), "、".join(h["title"][:24] for h in hits[:3])) if hits else "未命中"
+        check = result.get("recall_check") or {}
+        # 漏召回原来是静默的：显示「命中 4 节」，绿的，而该命中的那节不在里面。
+        # 把判据摊开写进摘要，退化才看得见。
+        warn = ""
+        if check.get("status") == "low_confidence":
+            warn = "（低置信：%s）" % "；".join(check.get("reasons") or [])
+        if not hits:
+            return "未命中%s" % warn
+        return "命中 %d 节：%s%s" % (
+            len(hits), "、".join(h["title"][:24] for h in hits[:3]), warn)
     if name == "get_doc_section":
         return "取回《%s》%s" % (result.get("doc", ""), result.get("title", ""))
     if name == "check_rule":
@@ -398,7 +420,7 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.id,
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                    "content": json.dumps(_for_model(result), ensure_ascii=False, default=str),
                 })
         else:
             stop_reason = "max_steps"
@@ -517,5 +539,5 @@ def _collect_evidence(evidence, name, args, result) -> None:
         # 判定引用到的规程条款，原文一并留存：依据面板里点得开、数据源里数得到。
         # 只写 evidence，**不回写 result** —— 调用方随后会把 result 序列化进模型上下文，
         # 在这里塞原文等于把同一段文字再发一遍，护栏水位也会跟着虚高。
-        for section in clause_sections(result):
+        for section in cited_sections(result):
             _add_doc(evidence, section)
