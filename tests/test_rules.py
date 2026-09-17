@@ -2,7 +2,7 @@
 """规则引擎测试。断言的是规程条款的落地结果，不是模型输出。"""
 import pytest
 
-from tools.rules import (RuleInputError, check_rule, clause_sections,
+from tools.rules import (RuleInputError, check_rule, cited_sections,
                          close_compliance, repeat_fault)
 
 
@@ -302,6 +302,26 @@ class TestReplacePrecondition:
     def test_unavailable_part_cites_clause_7_2(self):
         r = check_rule("replace_precondition", work_order_id="WO-260707")
         assert "7.2" in r["clauses"]
+        # 第 8 项是拿 part_available 判的，那个字段的语义由第 7.1 条定义
+        assert "7.1" in r["clauses"]
+
+    def test_switch_item_quotes_the_manual(self):
+        """第 5.1 条第 7 项写的是「已按**故障手册**断开相关开关」，条款直接指向手册。
+
+        不读手册，这一项就只剩一句"无法确认"：参考来源里没有手册，
+        现场核实清单也说不出要去断哪几个开关。
+        """
+        r = check_rule("replace_precondition", work_order_id="WO-260707")
+        item = next(c for c in r["facts"]["逐项核对"] if c["项"].startswith("7."))
+        assert item["结论"] == "现有资料无法确认"      # 是否已断开仍要现场确认
+        for switch in ("Q6", "Q13", "Q7", "Q8", "Q41"):
+            assert switch in item["依据"]
+        assert "fault_manual" in r["sources"]
+
+    def test_switches_taken_only_from_the_disconnect_line(self):
+        """手册别处也有 Q 编号（恢复步骤），多列一个开关在电力作业里不是小事。"""
+        from tools.rules import _manual_switches
+        assert _manual_switches("按步骤断开 Q6、Q13；\n更换后恢复 Q99。") == ["Q6", "Q13"]
 
 
 class TestDispatchAndInputGuard:
@@ -339,10 +359,16 @@ class TestDeclaredSources:
         r = check_rule("priority_required", turbine_id="T01", fault_code="24999")
         assert "safety_regulation" not in (r.get("sources") or [])
 
-    def test_clause_sections_return_original_text(self):
+    def test_manual_section_read_by_rule_is_retrievable(self):
+        """chip 上说"用了故障处理手册"，就得点得开是哪一节。"""
+        r = check_rule("replace_precondition", work_order_id="WO-260707")
+        docs = {s["section_id"] for s in cited_sections(r)}
+        assert "24010_SC_主变流器RAM自检失败" in docs
+
+    def test_cited_sections_return_original_text(self):
         """chip 上的条款号要能点开原文，两者必须同源。"""
         r = check_rule("priority_required", turbine_id="T05", fault_code="24005")
-        sections = clause_sections(r)
+        sections = cited_sections(r)
         ids = {s["section_id"] for s in sections}
         assert {"2.1", "2.4"} <= ids
         assert all(s["text"] and s["doc"].endswith(".md") for s in sections)
@@ -381,7 +407,7 @@ class TestGeneralQuestionMode:
         """原文要一起给，否则模型还得再 get_doc_section 取一遍。"""
         result = check_rule("replace_precondition")
         assert "第 7.3 条" in result.get("clause_texts", {})
-        assert [s["section_id"] for s in clause_sections(result)]
+        assert [s["section_id"] for s in cited_sections(result)]
 
     def test_general_answer_states_it_judged_nothing(self):
         """最危险的误用是把通则当成对某张工单的判定，措辞必须堵死。"""

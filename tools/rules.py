@@ -62,6 +62,11 @@ _TOUCHED: ContextVar[set[str] | None] = ContextVar("rule_sources", default=None)
 # 只进 span 明细，不进模型上下文：见 _run_tracking_sources 的 _audit_ 前缀约定。
 _QUERIES: ContextVar[list[dict[str, Any]] | None] = ContextVar("rule_queries", default=None)
 
+# 规则引擎读过的文档小节，同理要留痕：chip 上说"用了故障处理手册"，
+# 就得点得开是哪一节 —— 参考来源写的是「章节：24010_SC_主变流器RAM自检失败」，
+# 精确到节才对得上。条款那边早就这么做了，手册这边原先没有。
+_SECTIONS: ContextVar[list[dict[str, str]] | None] = ContextVar("rule_sections", default=None)
+
 _TABLES = ("alarm_records", "maintenance_records")
 
 
@@ -69,6 +74,13 @@ def _touch(source: str) -> None:
     touched = _TOUCHED.get()
     if touched is not None:
         touched.add(source)
+
+
+def _note_section(doc: str, section_id: str) -> None:
+    log = _SECTIONS.get()
+    entry = {"doc": doc, "section_id": section_id}
+    if log is not None and entry not in log:
+        log.append(entry)
 
 
 def _note_query(sql: str, row_count: int) -> None:
@@ -126,6 +138,7 @@ def _manual_text(fault_code: str) -> str:
         return ""
     # 安全链判定、4.1(3)、120 分钟门限是否适用都读了这一节，它是判定依据的一部分
     _touch("fault_manual")
+    _note_section("fault_manual", section.get("section_id") or fault_code)
     return section.get("text", "")
 
 
@@ -599,6 +612,25 @@ def close_compliance(work_order_id: str) -> dict[str, Any]:
 
 # ---------------------------------------------------------------- 6 更换前置条件
 
+_RE_SWITCH = re.compile(r"Q\d+")
+
+
+def _manual_switches(manual: str) -> list[str]:
+    """手册里「按步骤断开 Q6、Q13…」那一句列的开关。
+
+    只从含「断开」的那一句里取：手册别处（控制原理、恢复步骤）也会出现 Q 编号，
+    整篇扫会把不该断的开关也列进核对项 —— 在电力作业里这种"多列一个"不是小事。
+    """
+    found: list[str] = []
+    for line in manual.splitlines():
+        if "断开" not in line:
+            continue
+        for switch in _RE_SWITCH.findall(line):
+            if switch not in found:
+                found.append(switch)
+    return found
+
+
 def replace_precondition(work_order_id: str) -> dict[str, Any]:
     """规程第 5.1 条九项前置条件逐项核对。
 
@@ -614,10 +646,16 @@ def replace_precondition(work_order_id: str) -> dict[str, Any]:
                 "facts": {}, "unverifiable": [], "clauses": []}
 
     o = orders[0]
-    alarms = _alarms(o["turbine_id"], o["fault_code"] or "")
+    code = o.get("fault_code") or ""
+    alarms = _alarms(o["turbine_id"], code)
     latest = alarms[-1] if alarms else None
     stopped = bool(latest and latest["turbine_status"] == "STOPPED")
     part, avail = o.get("required_part"), o.get("part_available")
+    # 第 5.1 条第 7 项写的是「已按**故障手册**断开相关开关」—— 条款本身就指向手册，
+    # 手册里写明了是哪几个开关。不读手册，这一项就只剩一句"无法确认"：
+    # 手册进不了参考来源，现场核实清单也说不出到底要去断什么。
+    manual = _manual_text(code)
+    switches = _manual_switches(manual)
 
     checks = [
         {"项": "1. 机组已经停机", "结论": "满足" if stopped else "不满足",
@@ -627,7 +665,9 @@ def replace_precondition(work_order_id: str) -> dict[str, Any]:
         {"项": "4. 已执行挂牌上锁", "结论": "现有资料无法确认"},
         {"项": "5. 已完成验电", "结论": "现有资料无法确认"},
         {"项": "6. 母线电压降至约 20 V", "结论": "现有资料无法确认"},
-        {"项": "7. 已按手册断开相关开关", "结论": "现有资料无法确认"},
+        {"项": "7. 已按手册断开相关开关", "结论": "现有资料无法确认",
+         **({"依据": "故障手册 %s 节要求断开 %s；是否已执行，数据库无记录"
+                     % (code, "、".join(switches))} if switches else {})},
         {"项": "8. 所需备件当前可用",
          "结论": {1: "满足", 0: "不满足"}.get(avail, "该工单未记录备件需求"),
          "依据": "required_part=%s, part_available=%s" % (part, avail)},
@@ -650,7 +690,8 @@ def replace_precondition(work_order_id: str) -> dict[str, Any]:
                                              "status", "required_part", "part_available")},
                   "逐项核对": checks},
         "unverifiable": [c["项"] for c in checks if c["结论"] == "现有资料无法确认"] + SITE_CONDITIONS[:0],
-        "clauses": ["5.1", "5.2", "7.3"] + (["7.2"] if avail == 0 else []),
+        # 第 8 项拿 part_available 判备件，那个字段的语义正是第 7.1 条定义的，应一并援引
+        "clauses": ["5.1", "5.2", "7.1", "7.3"] + (["7.2"] if avail == 0 else []),
     }
 
 
@@ -750,18 +791,23 @@ def _run_tracking_sources(fn, args: dict[str, Any]) -> dict[str, Any]:
     """
     token = _TOUCHED.set(set())
     qtoken = _QUERIES.set([])
+    stoken = _SECTIONS.set([])
     try:
         result = fn(**args)
         touched = set(_TOUCHED.get() or ())
         queries = list(_QUERIES.get() or ())
+        sections = list(_SECTIONS.get() or ())
     finally:
         _TOUCHED.reset(token)
         _QUERIES.reset(qtoken)
+        _SECTIONS.reset(stoken)
 
     # `_audit_` 前缀 = 只进链路留存，不进模型上下文（loop._for_model 按前缀剥离）。
     # 原本靠"记得别回写 result"这条口头纪律，写进前缀约定才守得住。
     if queries:
         result["_audit_queries"] = queries
+    if sections:
+        result["_audit_doc_sections"] = sections
 
     # 引用了条款，规程就是本次结论的数据源之一 —— 哪怕模型一次 get_doc_section 都没调。
     # 反过来，没有记录、没得判（clauses 为空）时不能顺手把规程也记上。
@@ -772,18 +818,24 @@ def _run_tracking_sources(fn, args: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def clause_sections(result: dict[str, Any]) -> list[dict[str, Any]]:
-    """本次判定引用到的规程条款原文，供证据留存。
+def cited_sections(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """本次判定读过或引用到的文档小节原文，供证据留存。
+
+    两类：引用到的规程条款，以及规则引擎自己读过的手册小节（如第 5.1 条第 7 项
+    「已按**故障手册**断开相关开关」，条款本身就指向手册）。
 
     原文早就随 clause_texts 给了模型，但只到模型为止：界面上的「原始依据」与
-    「使用的数据源」都只认 evidence.docs，于是规程成了唯一一份"参与了判定、
+    「使用的数据源」都只认 evidence.docs，于是这两份成了"参与了判定、
     却在依据里看不到"的资料。这里把它补齐，条款号与原文同源，不是贴个标签。
     """
     from tools.retriever import get_doc_section
 
+    wanted = [("safety_regulation", clause) for clause in result.get("clauses") or []]
+    wanted += [(e["doc"], e["section_id"]) for e in result.get("_audit_doc_sections") or ()]
+
     sections = []
-    for clause in result.get("clauses") or []:
-        section = get_doc_section("safety_regulation", clause)
+    for doc, section_id in wanted:
+        section = get_doc_section(doc, section_id)
         if not section.get("ok"):
             continue
         sections.append({
