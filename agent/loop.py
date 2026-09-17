@@ -30,6 +30,10 @@ from agent.tracing import DEGRADED, ERROR, OK, TOOL_KIND, Trace
 from tools.budget import ContextBudget, measure
 from tools.pricing import cost as price_of
 
+# span 明细里「详情」展开的单侧上限。取回的文档节可达数千字，
+# 50 条留存乘上去会把内存吃掉，超出就截断并标出来，不假装是全文。
+DETAIL_CAP = 4000
+
 MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "6"))
 MAX_UNGROUNDED_RETRIES = 1
 # 提示词强制的第一个二级标题，用作"最终答案已开始"的分界
@@ -138,6 +142,8 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
     except Exception as exc:
         span.close(input_summary="上下文 %d 条消息" % len(messages),
                    output_summary="%s：%s" % (type(exc).__name__, exc),
+                   input_detail=_request_detail(model, messages),
+                   output_detail=_detail({"error": "%s：%s" % (type(exc).__name__, exc)}),
                    status=ERROR)
         raise
 
@@ -152,6 +158,13 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
         input_summary="prompt %d tok%s" % (pt, "（缓存命中 %d）" % cached if cached else ""),
         output_summary=(("发起 %d 个工具调用：%s" % (len(calls), "、".join(c.function.name for c in calls)))
                         if calls else (content[:110] + ("…" if len(content) > 110 else ""))),
+        input_detail=_request_detail(model, messages),
+        output_detail=_detail({
+            "content": content,
+            "tool_calls": [{"name": c.function.name, "arguments": c.function.arguments}
+                           for c in calls],
+            "usage": {"prompt_tokens": pt, "completion_tokens": ct, "cached_tokens": cached},
+        }),
         prompt_tokens=pt, completion_tokens=ct, cached_tokens=cached,
         cost_cny=round(price_of(model, pt, ct, cached), 6),
     )
@@ -162,6 +175,35 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
         # 模型没按三段格式输出时的兜底：一次性给出，不让界面空着
         yield {"type": "token", "text": content}
     yield {"type": "_message", "message": _Msg(content, calls)}
+
+
+def _detail(obj: Any) -> str:
+    """span 详情：完整的输入/输出参数，供后台展开查看。"""
+    text = json.dumps(obj, ensure_ascii=False, indent=2, default=str)
+    return text if len(text) <= DETAIL_CAP else text[:DETAIL_CAP] + "\n…（超出 %d 字符已截断）" % DETAIL_CAP
+
+
+def _request_detail(model: str, messages: list[dict[str, Any]]) -> str:
+    """模型调用的输入侧。
+
+    完整提示词与历史不留存——system 提示词每轮重复、工具返回在对应的 TOOL span 里
+    已有原文，再存一份是把同样的内容乘以轮数。这里给出构成与本轮最后一条消息，
+    并把这件事写在 note 里，不让人误以为看到的就是全部输入。
+    """
+    last = messages[-1] if messages else {}
+    roles: dict[str, int] = {}
+    for m in messages:
+        roles[m.get("role", "?")] = roles.get(m.get("role", "?"), 0) + 1
+    return _detail({
+        "model": model,
+        "enable_thinking": ENABLE_THINKING,
+        "tools": [t["function"]["name"] for t in TOOLS],
+        "messages": len(messages),
+        "by_role": roles,
+        "last_message": {"role": last.get("role"),
+                         "content": str(last.get("content") or "")[:600]},
+        "note": "完整提示词与历史未留存；工具返回的原文见对应 TOOL / RAG / RULE span",
+    })
 
 
 def _plain(msg) -> dict[str, Any]:
@@ -313,6 +355,8 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
                 tool_span.close(
                     input_summary=json.dumps(args, ensure_ascii=False)[:160],
                     output_summary=entry["summary"],
+                    input_detail=_detail(args),
+                    output_detail=_detail(result),
                     status=OK if entry["ok"] else ERROR,
                 )
                 _collect_evidence(evidence, name, args, result)
@@ -383,6 +427,8 @@ def _force_answer(client: OpenAI, model: str, messages: list[dict[str, Any]], tr
     except Exception as exc:
         span.close(input_summary="上下文 %d 条消息" % len(messages),
                    output_summary="%s：%s" % (type(exc).__name__, exc),
+                   input_detail=_request_detail(model, messages),
+                   output_detail=_detail({"error": "%s：%s" % (type(exc).__name__, exc)}),
                    status=ERROR)
         raise
     content = resp.choices[0].message.content or ""
@@ -393,6 +439,10 @@ def _force_answer(client: OpenAI, model: str, messages: list[dict[str, Any]], tr
     span.close(
         input_summary="prompt %d tok%s" % (pt, "（缓存命中 %d）" % cached if cached else ""),
         output_summary=content[:110] + ("…" if len(content) > 110 else ""),
+        input_detail=_request_detail(model, messages),
+        output_detail=_detail({"content": content,
+                               "usage": {"prompt_tokens": pt, "completion_tokens": ct,
+                                         "cached_tokens": cached}}),
         prompt_tokens=pt, completion_tokens=ct, cached_tokens=cached,
         cost_cny=round(price_of(model, pt, ct, cached), 6),
     )

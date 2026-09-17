@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>回答 · 海上风电机组维检 Agent</title>
+<style>
+/* 单条回答的独立页：只放这一次问答的结论与依据，执行过程留在链路追踪页。
+   排版按「读完整篇」来——一栏、行长受限、可直接打印，不做任何折叠与截断。 */
+:root{
+  --ground:#EDF1F2; --surface:#fff; --surface-2:#F3F6F7;
+  --ink:#0C1619; --ink-2:#3B4C53; --muted:#6B7F86;
+  --line:#DDE5E7; --line-2:#C9D5D8;
+  --accent:#0A6C74; --accent-soft:#E0EFF0;
+  --ok:#2A6A4C; --ok-soft:#E3F0E9; --warn:#8C5205; --warn-soft:#FBF0DF;
+  --crit:#A3271F; --crit-soft:#F9E7E5;
+  --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Helvetica Neue",sans-serif;
+  --mono:"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --ground:#0A1114; --surface:#121E22; --surface-2:#16242A;
+  --ink:#E4EBED; --ink-2:#AFC0C6; --muted:#7E9299;
+  --line:#1F2E33; --line-2:#2B3E44;
+  --accent:#4FC0C9; --accent-soft:#0D2B2E;
+  --ok:#6FC194; --ok-soft:#11261C; --warn:#D49B3E; --warn-soft:#291F11;
+  --crit:#E07C73; --crit-soft:#2A1513;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.8 var(--sans);
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:760px;margin:0 auto;padding:36px 24px 80px}
+.back{display:inline-block;font-size:12.5px;color:var(--muted);text-decoration:none;margin-bottom:20px}
+.back:hover{color:var(--accent)}
+h1{font-size:1.42rem;line-height:1.45;margin:0 0 12px;letter-spacing:-.01em}
+.ids{font-family:var(--mono);font-size:11.5px;color:var(--muted);overflow-wrap:anywhere}
+.badges{display:flex;gap:7px;flex-wrap:wrap;margin-top:14px}
+.bd{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.05em;
+  padding:4px 10px;border-radius:20px;border:1px solid var(--line-2);color:var(--ink-2)}
+.bd.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.bd.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
+.bd.crit{background:var(--crit-soft);color:var(--crit);border-color:transparent}
+h2{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--muted);font-weight:600;margin:32px 0 10px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:22px 26px}
+.card.warn{background:var(--warn-soft);border-color:transparent}
+.body{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink-2)}
+.body strong{color:var(--ink)}
+ul.un{margin:0;padding-left:18px;color:var(--ink-2)}
+ul.un li{margin-bottom:8px}
+ul.un li:last-child{margin-bottom:0}
+.chips{display:flex;gap:7px;flex-wrap:wrap}
+.chip{font-family:var(--mono);font-size:10.5px;padding:3px 9px;border-radius:4px;
+  background:var(--accent-soft);color:var(--accent)}
+.err{color:var(--crit)}
+@media print{
+  body{background:#fff}
+  .wrap{max-width:none;padding:0}
+  .back{display:none}
+  .card{border-color:#ccc}
+}
+</style>
+</head>
+<body>
+<div class="wrap" id="wrap"><p style="color:var(--muted)">加载中…</p></div>
+<script>
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+// 模型偶尔写字面量 \n 而不是真换行；先还原再转义，否则页面上会出现一串 \n
+const text = s => esc(String(s ?? '').replace(/\\n/g, '\n'))
+  .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+
+const SRC = {online: '线上问答', eval: '回归跑测'};
+
+(async () => {
+  const id = new URLSearchParams(location.search).get('trace');
+  const box = document.getElementById('wrap');
+  const back = '<a class="back" href="/admin#traces">← 回到链路追踪</a>';
+  if (!id) { box.innerHTML = back + '<p class="err">缺少 trace 参数。</p>'; return; }
+
+  const d = await fetch('/api/traces/' + encodeURIComponent(id), {cache: 'no-store'})
+    .then(r => r.json()).catch(e => ({error: String(e)}));
+  if (d.error) { box.innerHTML = back + `<p class="err">${esc(d.error)}</p>`; return; }
+
+  document.title = d.question ? d.question.slice(0, 40) + ' · 回答' : '回答';
+  const un = d.unverifiable || [];
+  box.innerHTML = `${back}
+    <h1>${esc(d.question)}</h1>
+    <div class="ids">${esc(d.short_id || '')} · ${SRC[d.source === 'eval' ? 'eval' : 'online']}
+      · ${esc(d.model || '')} · ${esc(d.at || '')} · ${((d.elapsed_ms || 0) / 1000).toFixed(2)}s</div>
+    <div class="badges">
+      <span class="bd ${d.status === 'SUCCESS' ? 'ok' : d.status === 'FAILED' ? 'crit' : 'warn'}">${
+        esc(d.status || '')}</span>
+      ${un.length ? `<span class="bd warn">无法确认 ${un.length} 项</span>` : ''}
+    </div>
+
+    <h2>回答</h2>
+    <div class="card"><div class="body">${text(d.answer) || '（本次没有产出回答）'}</div></div>
+
+    ${un.length ? `<h2>现有资料无法确认（${un.length} 项）</h2>
+      <div class="card warn"><ul class="un">${
+        un.map(u => `<li>${text(u)}</li>`).join('')}</ul></div>` : ''}
+
+    ${d.sources?.length ? `<h2>使用的数据源</h2>
+      <div class="chips">${d.sources.map(x => `<span class="chip">${esc(x)}</span>`).join('')}</div>` : ''}`;
+})();
+</script>
+</body>
+</html>

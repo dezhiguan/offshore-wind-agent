@@ -317,6 +317,23 @@ table.spans thead th{background:var(--surface)}
 .tg.GUARD{background:var(--warn-soft);color:var(--warn)}
 .sv{font-family:var(--mono);font-size:9.5px;font-weight:700}
 .sv.OK{color:var(--ok)} .sv.ERROR{color:var(--crit)} .sv.DEGRADED{color:var(--warn)}
+/* span 详情：默认收起，展开后给完整的输入输出参数 */
+button.spx{font:inherit;font-size:10px;line-height:1;cursor:pointer;padding:4px 6px;
+  border-radius:5px;border:1px solid var(--line-2);background:var(--surface);color:var(--muted)}
+button.spx:hover{border-color:var(--accent);color:var(--accent)}
+button.spx.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
+tr.sdet{display:none}
+tr.sdet.open{display:table-row}
+tr.sdet>td{background:var(--sunken);padding:12px 14px}
+.sbox{display:grid;grid-template-columns:1fr;gap:10px}
+@media (min-width:900px){.sbox{grid-template-columns:1fr 1fr}}
+.sbox .io h5{margin:0 0 6px;font-family:var(--mono);font-size:9px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--muted);font-weight:600}
+.sbox .io h5 em{font-style:normal;letter-spacing:0;text-transform:none;margin-left:7px;
+  color:var(--warn);font-weight:400}
+.sbox pre{margin:0;font-family:var(--mono);font-size:10.5px;line-height:1.6;color:var(--ink-2);
+  background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:10px 12px;
+  max-height:300px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
 .empty{color:var(--muted);font-size:13px;padding:44px 26px;text-align:center;
   background:var(--surface);border:1px dashed var(--line-2);border-radius:var(--r)}
 .empty a{color:var(--accent)}
@@ -414,12 +431,21 @@ function pipeline(spans) {
       <div class="n">${esc(s.name)}</div><div class="t">${s.elapsed_ms}ms</div></div>`).join('') + '</div>';
 }
 // 类型并进 Span 列：主从布局下右侧面板只有 ~700px，六列会把摘要挤成竖排。
+// 表里给的是摘要（摘要才能一眼扫完一条链路），完整参数放进默认收起的详情行。
+// 没有留存原文的那一侧（模型调用的完整提示词）如实说明，不拿摘要冒充全文。
+function spanIO(s) {
+  const pane = (t, full, brief) => `<div class="io">
+    <h5>${t}${full ? '' : '<em>未留存原文，以下为摘要</em>'}</h5>
+    <pre>${esc(full || brief || '（无）')}</pre></div>`;
+  return `<div class="sbox">${pane('输入', s.input_detail, s.input)}${
+    pane('输出', s.output_detail, s.output)}</div>`;
+}
 function spanTable(spans) {
   return `<div class="tw"><table class="spans">
-    <colgroup><col style="width:23%"><col style="width:30%"><col style="width:33%">
-      <col style="width:58px"><col style="width:62px"></colgroup>
+    <colgroup><col style="width:23%"><col style="width:28%"><col style="width:31%">
+      <col style="width:58px"><col style="width:62px"><col style="width:58px"></colgroup>
     <thead><tr><th>Span</th><th>输入摘要</th><th>输出摘要</th>
-      <th style="text-align:right">耗时</th><th>状态</th></tr></thead>
+      <th style="text-align:right">耗时</th><th>状态</th><th style="white-space:nowrap">详情</th></tr></thead>
     <tbody>${spans.map(s => `<tr>
       <td><span class="tg ${s.kind}">${s.kind}</span>
         <div class="spn">${esc(s.name)}</div>
@@ -427,8 +453,21 @@ function spanTable(spans) {
       <td>${esc(clip(s.input, 130)) || '—'}</td>
       <td>${esc(clip(s.output, 170)) || '—'}</td>
       <td class="num">${s.elapsed_ms}ms</td>
-      <td><span class="sv ${s.status}">${s.status}</span></td></tr>`).join('')}</tbody></table></div>`;
+      <td><span class="sv ${s.status}">${s.status}</span></td>
+      <td><button class="spx" type="button" title="展开输入输出参数">▸</button></td></tr>
+      <tr class="sdet"><td colspan="6">${spanIO(s)}</td></tr>`).join('')}</tbody></table></div>`;
 }
+
+// span 表被三处 innerHTML 插入，逐处绑事件容易漏，统一走委托
+document.addEventListener('click', e => {
+  const b = e.target.closest('button.spx');
+  if (!b) return;
+  // 用例表那一层也在监听行点击，不拦住会把整条详情一起收起来
+  e.stopPropagation();
+  b.classList.toggle('on');
+  b.textContent = b.classList.contains('on') ? '▾' : '▸';
+  b.closest('tr').nextElementSibling?.classList.toggle('open');
+});
 const miniBar = (v, hot) => v == null ? '—'
   : `<span class="mini"><i class="${hot ? 'hot' : ''}" style="width:${Math.max(3, Math.min(100, v))}%"></i></span>${v.toFixed(1)}%`;
 
