@@ -589,18 +589,44 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
 def _force_answer(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Trace) -> str:
     """步数用尽时，要求模型基于已有证据收口，而不是无声截断。
 
-    这一次同样开 span：它是货真价实的一次模型调用，不记的话步数用尽的链路
-    在后台会少算一次调用，token 与成本也跟着漏计。
+    **这一次也要带上 tools**（2026-09-18 改）。先前为了防止模型又去调工具而把它拿掉，
+    结果是前缀变了、缓存从工具定义那里整段作废：实测 prompt 6005 token 只命中 1024，
+    而带着工具的同类调用命中 3072 —— 多算约 2000 个 token 的 prefill，且这些 token
+    按未缓存价计费，单次成本贵 43%。不让它调工具靠的是上面那句用户消息，不是靠
+    把工具藏起来。
+
+    万一它还是不听、回了个工具调用而正文为空，再补一次不带工具的调用兜底——
+    那一次单独开 span，不并进上一次：两次调用各自烧了 token，合成一条记录会让
+    「模型调用次数」少算一次，成本也跟着漏。
     """
     messages.append({
         "role": "user",
         "content": "已达到查询步数上限。请基于上面已经取得的证据直接作答；"
                    "证据不足的部分放进「现有资料无法确认」，不要再调用工具。",
     })
-    span = trace.start("MODEL", "步数用尽收口", detail=model)
+    content, called_tools = _closing_call(client, model, messages, trace,
+                                          "步数用尽收口", with_tools=True)
+    if content.strip() or not called_tools:
+        return content
+    # 正文为空且又发了工具调用：撤下工具再问一次，这次它没有别的选择
+    content, _ = _closing_call(client, model, messages, trace,
+                               "步数用尽收口（撤下工具重试）", with_tools=False)
+    return content
+
+
+def _closing_call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Trace,
+                  name: str, *, with_tools: bool) -> tuple[str, bool]:
+    """收口用的单次非流式调用。返回（正文，这次有没有发起工具调用）。
+
+    同样开 span：它是货真价实的一次模型调用，不记的话步数用尽的链路在后台会少算
+    一次调用，token 与成本也跟着漏计。
+    """
+    span = trace.start("MODEL", name, detail=model)
+    extra: dict[str, Any] = {"tools": TOOLS} if with_tools else {}
     try:
         resp = client.chat.completions.create(
             model=model, messages=messages, extra_body={"enable_thinking": ENABLE_THINKING},
+            **extra,
         )
     except Exception as exc:
         # 非流式调用异常时连 usage 对象都没有，同样标成"未计量"
@@ -610,22 +636,28 @@ def _force_answer(client: OpenAI, model: str, messages: list[dict[str, Any]], tr
                    output_detail=_detail({"error": "%s：%s" % (type(exc).__name__, exc)}),
                    status=ERROR, usage_missing=True)
         raise
-    content = resp.choices[0].message.content or ""
+    message = resp.choices[0].message
+    content = message.content or ""
+    called_tools = bool(getattr(message, "tool_calls", None))
     usage = getattr(resp, "usage", None)
     pt = getattr(usage, "prompt_tokens", 0) or 0
     ct = getattr(usage, "completion_tokens", 0) or 0
     cached = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
+    # 收口轮又发工具调用是降级：这一次没产出可用正文，得让它在异常清单里看得见
+    empty_with_tools = called_tools and not content.strip()
     span.close(
         input_summary="prompt %d tok%s" % (pt, "（缓存命中 %d）" % cached if cached else ""),
-        output_summary=content[:110] + ("…" if len(content) > 110 else ""),
+        output_summary=("收口轮仍发起工具调用且正文为空，已撤下工具重试"
+                        if empty_with_tools else content[:110] + ("…" if len(content) > 110 else "")),
         input_detail=_request_detail(model, messages),
-        output_detail=_detail({"content": content,
+        output_detail=_detail({"content": content, "tool_calls": called_tools,
                                "usage": {"prompt_tokens": pt, "completion_tokens": ct,
                                          "cached_tokens": cached}}),
+        status=DEGRADED if empty_with_tools else OK,
         prompt_tokens=pt, completion_tokens=ct, cached_tokens=cached,
         cost_cny=round(price_of(model, pt, ct, cached), 6),
     )
-    return content
+    return content, called_tools
 
 
 # 收口时长度直接决定耗时，见 _call 的说明
