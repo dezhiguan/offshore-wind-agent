@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 load_dotenv(ROOT / ".env")
 
-from agent import evalview  # noqa: E402
+from agent import evalview, grounding  # noqa: E402
 from agent.composer import compose  # noqa: E402
 from agent.loop import run_agent  # noqa: E402
 from eval.verdict import check  # noqa: E402
@@ -48,7 +48,9 @@ def main(argv: list[str]) -> int:
     for case in cases:
         t0 = time.monotonic()
         try:
-            result = compose(case["question"], run_agent(case["question"]))
+            # 接地校验要和问答页走同一条路：这里不挂，命令行跑出来的产物就没有
+            # meta.grounding，「接地校验存疑」那张卡的分母会随"这批是谁跑的"变来变去。
+            result = grounding.apply(compose(case["question"], run_agent(case["question"])))
             ok, problems = check(case, result)
         except Exception as exc:
             result, ok, problems = {"error": str(exc)}, False, ["异常：%s" % exc]

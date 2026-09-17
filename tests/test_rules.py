@@ -2,7 +2,8 @@
 """规则引擎测试。断言的是规程条款的落地结果，不是模型输出。"""
 import pytest
 
-from tools.rules import RuleInputError, check_rule, close_compliance, repeat_fault
+from tools.rules import (RuleInputError, check_rule, clause_sections,
+                         close_compliance, repeat_fault)
 
 
 class TestRepeatFault:
@@ -152,3 +153,39 @@ class TestDispatchAndInputGuard:
         """模型常会多塞参数，不能因此报错。"""
         r = check_rule("repeat_fault", turbine_id="T03", fault_code="24002", nonsense=1)
         assert r["ok"] is True
+
+
+class TestDeclaredSources:
+    """规则引擎替模型查掉的东西，必须自己报出来。
+
+    T05 那条不合规结论完全来自规程第 2.1 / 2.4 条，两张表也都是规则引擎查的，
+    模型一次 query_db / get_doc_section 都不调也能成立 —— 不自报，依据面板就全空。
+    """
+
+    def test_reports_tables_touched_by_nested_rule(self):
+        r = check_rule("priority_required", turbine_id="T05", fault_code="24005")
+        assert "alarm_records" in r["sources"]          # priority_required 自己查的
+        assert "maintenance_records" in r["sources"]    # 比对现有工单时查的
+        assert "safety_regulation" in r["sources"]      # 判定引用了第 2.1 / 2.4 条
+        assert "fault_manual" in r["sources"]           # 安全链判定读了手册那一节
+
+    def test_no_clause_no_regulation_claimed(self):
+        """查无记录时没有任何条款可援引，不能顺手把规程记成数据源。"""
+        r = check_rule("priority_required", turbine_id="T01", fault_code="24999")
+        assert "safety_regulation" not in (r.get("sources") or [])
+
+    def test_clause_sections_return_original_text(self):
+        """chip 上的条款号要能点开原文，两者必须同源。"""
+        r = check_rule("priority_required", turbine_id="T05", fault_code="24005")
+        sections = clause_sections(r)
+        ids = {s["section_id"] for s in sections}
+        assert {"2.1", "2.4"} <= ids
+        assert all(s["text"] and s["doc"].endswith(".md") for s in sections)
+
+    def test_sources_do_not_leak_across_calls(self):
+        """上一条规则查过的表，不能算到下一条头上。"""
+        full = check_rule("priority_required", turbine_id="T05", fault_code="24005")
+        assert "maintenance_records" in full["sources"]
+        # 查无告警时在比对工单之前就返回了，工单表这一次没碰过
+        r = check_rule("priority_required", turbine_id="T01", fault_code="24999")
+        assert "maintenance_records" not in (r.get("sources") or [])

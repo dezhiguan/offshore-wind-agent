@@ -29,6 +29,7 @@ from agent.tools_spec import TOOLS, TOOL_REGISTRY
 from agent.tracing import DEGRADED, ERROR, OK, TOOL_KIND, Trace
 from tools.budget import ContextBudget, measure
 from tools.pricing import cost as price_of
+from tools.rules import clause_sections
 
 # span 明细里「详情」展开的单侧上限。取回的文档节可达数千字，
 # 50 条留存乘上去会把内存吃掉，超出就截断并标出来，不假装是全文。
@@ -485,6 +486,14 @@ def _force_answer(client: OpenAI, model: str, messages: list[dict[str, Any]], tr
 # 收口时长度直接决定耗时，见 _call 的说明
 
 
+def _add_doc(evidence, section: dict[str, Any]) -> None:
+    """同一节可能既被模型取过、又被规则判定带出来，只留一份。"""
+    key = (section.get("doc"), section.get("section_id"))
+    if any((d.get("doc"), d.get("section_id")) == key for d in evidence["docs"]):
+        return
+    evidence["docs"].append(section)
+
+
 def _collect_evidence(evidence, name, args, result) -> None:
     if not result.get("ok", True):
         return
@@ -496,7 +505,7 @@ def _collect_evidence(evidence, name, args, result) -> None:
             "row_count": result.get("row_count", 0),
         })
     elif name == "get_doc_section":
-        evidence["docs"].append({
+        _add_doc(evidence, {
             "doc": result.get("doc"),
             "section_id": result.get("section_id"),
             "title": result.get("title"),
@@ -505,3 +514,8 @@ def _collect_evidence(evidence, name, args, result) -> None:
         })
     elif name == "check_rule":
         evidence["rules"].append({"rule": args.get("rule"), "result": result})
+        # 判定引用到的规程条款，原文一并留存：依据面板里点得开、数据源里数得到。
+        # 只写 evidence，**不回写 result** —— 调用方随后会把 result 序列化进模型上下文，
+        # 在这里塞原文等于把同一段文字再发一遍，护栏水位也会跟着虚高。
+        for section in clause_sections(result):
+            _add_doc(evidence, section)

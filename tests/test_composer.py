@@ -37,8 +37,61 @@ def test_three_sections_parsed():
 def test_sources_derived_from_actual_calls():
     out = compose("q", RUN)
     assert "运行告警记录（alarm_records）" in out["sources"]
-    assert "检修作业与安全管理规程" in out["sources"]
+    # 规程带条款号：只说"用了规程"，看的人没法对着条款去查
+    assert "检修作业与安全管理规程（第 3.1 条）" in out["sources"]
     assert "维检工单记录（maintenance_records）" not in out["sources"]
+
+
+def test_rule_verdict_counts_as_regulation_source():
+    """T05 那条：结论全部来自规程第 2.1 / 2.4 条，模型一次文档都没取。
+
+    只统计模型自己发的 SQL 和自己取回的文档，规程就会整条消失，
+    而「结论依据」那一栏还明明白白引着条款号。
+    """
+    run = dict(RUN, evidence={
+        "tables": [], "docs": [],
+        "rules": [{"rule": "priority_required", "result": {
+            "ok": True,
+            "sources": ["alarm_records", "maintenance_records", "safety_regulation"],
+            "clauses": ["2.4", "2.1"],
+        }}],
+    })
+    assert compose("q", run)["sources"] == [
+        "运行告警记录（alarm_records）",
+        "维检工单记录（maintenance_records）",
+        "检修作业与安全管理规程（第 2.1、2.4 条）",
+    ]
+
+
+def test_source_order_is_stable_regardless_of_call_order():
+    run = dict(RUN, evidence={
+        "tables": [{"sql": "SELECT * FROM maintenance_records", "rows": []}],
+        "docs": [{"doc": "故障处理手册.md", "section_id": "24005"}],
+        "rules": [{"rule": "repeat_fault",
+                   "result": {"ok": True, "sources": ["alarm_records"], "clauses": ["3.1"]}}],
+    })
+    assert compose("q", run)["sources"] == [
+        "运行告警记录（alarm_records）",
+        "维检工单记录（maintenance_records）",
+        "故障处理手册",
+        "检修作业与安全管理规程（第 3.1 条）",
+    ]
+
+
+def test_clauses_sorted_numerically_not_lexically():
+    run = dict(RUN, evidence={"tables": [], "docs": [], "rules": [
+        {"rule": "close_compliance",
+         "result": {"ok": True, "sources": ["safety_regulation"],
+                    "clauses": ["6.10", "6.2", "6.1"]}}]})
+    assert compose("q", run)["sources"] == ["检修作业与安全管理规程（第 6.1、6.2、6.10 条）"]
+
+
+def test_no_records_no_clauses_means_no_regulation_chip():
+    """查无记录、没得判的规则不能顺手把规程也记成数据源。"""
+    run = dict(RUN, evidence={"tables": [], "docs": [], "rules": [
+        {"rule": "priority_required",
+         "result": {"ok": True, "clauses": [], "verdict": "数据库中没有 T99 的告警记录。"}}]})
+    assert compose("q", run)["sources"] == []
 
 
 def test_none_marker_means_empty_not_missing():
