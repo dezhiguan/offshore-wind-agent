@@ -51,6 +51,17 @@ class RuleInputError(ValueError):
 # 触达的数据源记下来，随结果一起交出去。
 _TOUCHED: ContextVar[set[str] | None] = ContextVar("rule_sources", default=None)
 
+# 规则引擎发的 SQL 也要留痕，理由和上面那段是同一个，只是更进一步。
+#
+# `sources` 回答的是「读过哪张表」，回答不了「这个数字怎么来的」。实测一次链路：
+# 答案里写「现有工单 WO-260703 为 NORMAL」，而 span 明细里一条查工单表的 SQL 都没有
+# —— 工单号来自 priority_required 内部的查询，它不经过模型的工具调用，于是
+# **确定性的那条路反而比模型那条路更不透明**：模型发的 query_db 有 SQL 原文和返回行，
+# 可复现；规则引擎发的只剩一句结论。而规则结论是直接进判定的，权重更高，越该留痕。
+#
+# 只进 span 明细，不进模型上下文：见 _run_tracking_sources 的 _audit_ 前缀约定。
+_QUERIES: ContextVar[list[dict[str, Any]] | None] = ContextVar("rule_queries", default=None)
+
 _TABLES = ("alarm_records", "maintenance_records")
 
 
@@ -58,6 +69,12 @@ def _touch(source: str) -> None:
     touched = _TOUCHED.get()
     if touched is not None:
         touched.add(source)
+
+
+def _note_query(sql: str, row_count: int) -> None:
+    log = _QUERIES.get()
+    if log is not None:
+        log.append({"sql": " ".join(sql.split()), "row_count": row_count})
 
 
 def _lit(value: str, pattern: re.Pattern, name: str) -> str:
@@ -79,6 +96,7 @@ def _rows(sql: str) -> list[dict[str, Any]]:
     for table in _TABLES:
         if table in sql:
             _touch(table)
+    _note_query(sql, len(result["rows"]))
     return result["rows"]
 
 
@@ -731,11 +749,19 @@ def _run_tracking_sources(fn, args: dict[str, Any]) -> dict[str, Any]:
     「这个结论建立在什么之上」，不是「哪一层函数发的 SQL」。
     """
     token = _TOUCHED.set(set())
+    qtoken = _QUERIES.set([])
     try:
         result = fn(**args)
         touched = set(_TOUCHED.get() or ())
+        queries = list(_QUERIES.get() or ())
     finally:
         _TOUCHED.reset(token)
+        _QUERIES.reset(qtoken)
+
+    # `_audit_` 前缀 = 只进链路留存，不进模型上下文（loop._for_model 按前缀剥离）。
+    # 原本靠"记得别回写 result"这条口头纪律，写进前缀约定才守得住。
+    if queries:
+        result["_audit_queries"] = queries
 
     # 引用了条款，规程就是本次结论的数据源之一 —— 哪怕模型一次 get_doc_section 都没调。
     # 反过来，没有记录、没得判（clauses 为空）时不能顺手把规程也记上。

@@ -397,3 +397,61 @@ class TestGeneralQuestionMode:
 
     def test_unknown_rule_still_errors(self):
         assert check_rule("no_such_rule")["ok"] is False
+
+
+class TestRuleQueryAudit:
+    """规则引擎自己发的 SQL 必须留痕。
+
+    起因：一次链路的答案里写「现有工单 WO-260703 为 NORMAL」，而 span 明细里
+    一条查工单表的 SQL 都没有 —— 工单号来自 priority_required 内部查询，不经过
+    模型的工具调用。确定性的那条路反而比模型那条路更不透明，而它的结论权重更高。
+    """
+
+    def test_queries_recorded_with_row_counts(self):
+        result = check_rule("priority_required", turbine_id="T03", fault_code="24002")
+        queries = result.get("_audit_queries")
+        assert queries, "规则内部查询未留痕"
+        assert any("maintenance_records" in q["sql"] for q in queries), "工单号的出处没记下来"
+        assert all(isinstance(q["row_count"], int) for q in queries)
+
+    def test_nested_rule_queries_attributed_to_parent(self):
+        """priority_required 内部会调 repeat_fault，子规则的查询也要算在父结果上。"""
+        result = check_rule("remote_reset_ban", turbine_id="T03", fault_code="24002")
+        assert len(result.get("_audit_queries") or []) >= 1
+
+    def test_audit_keys_do_not_reach_the_model(self):
+        """留痕和喂模型是两件事：SQL 进 span，不进上下文。"""
+        from agent.loop import _for_model
+        result = check_rule("priority_required", turbine_id="T03", fault_code="24002")
+        assert "_audit_queries" in result
+        assert not any(k.startswith("_audit_") for k in _for_model(result))
+        assert "verdict" in _for_model(result), "剥离不能误伤正常字段"
+
+
+class TestRemoteResetChecklist:
+    """第 4.1 条五款确定性摊开，不靠模型记得写。"""
+
+    def test_all_five_clauses_rendered(self):
+        from agent.checklist import build
+        result = check_rule("remote_reset_ban", turbine_id="T03", fault_code="24002")
+        cards = build({"rules": [{"rule": "remote_reset_ban", "result": result}]})
+        assert cards, "未生成清单卡"
+        items = cards[0]["items"]
+        assert len(items) == 5, "第 4.1 条是五款，少一款都不行"
+        assert all(i["label"].startswith("4.1(") for i in items)
+
+    def test_ban_condition_met_is_blocked_not_ok(self):
+        """语义与其他清单相反：这里「成立」是禁止情形成立，是坏消息。"""
+        from agent.checklist import build
+        result = check_rule("remote_reset_ban", turbine_id="T03", fault_code="24002")
+        items = build({"rules": [{"rule": "remote_reset_ban", "result": result}]})[0]["items"]
+        by_verdict = {i["verdict"]: i["state"] for i in items}
+        assert by_verdict.get("成立") == "blocked"
+        assert by_verdict.get("不成立") == "ok"
+        assert by_verdict.get("资料无法确认") == "pending"
+
+    def test_no_alarm_record_yields_no_card(self):
+        """没有告警记录时规则不出 facts，清单也不该凭空造。"""
+        from agent.checklist import build
+        result = check_rule("remote_reset_ban", turbine_id="T99", fault_code="24002")
+        assert build({"rules": [{"rule": "remote_reset_ban", "result": result}]}) == []

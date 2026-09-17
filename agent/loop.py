@@ -197,6 +197,19 @@ def _usage_of(model: str, usage: Any) -> dict[str, Any]:
             "cost_cny": round(price_of(model, pt, ct, cached), 6)}
 
 
+def _for_model(result: dict[str, Any]) -> dict[str, Any]:
+    """发给模型的那一份：剥掉 `_audit_` 开头的键。
+
+    留痕和喂模型是两件事。规则引擎内部发的 SQL 要进 span 供审计复现，但发给模型
+    毫无用处 —— 它已经拿到结论和 facts 了，多出来的 SQL 只是烧 token，还会把
+    护栏的上下文水位抬高。
+
+    这条边界原本靠"记得别回写 result"的口头纪律守（见 _collect_evidence 里那段
+    注释），加一条就得记一次。改成按前缀剥离，新增审计字段时自动生效。
+    """
+    return {k: v for k, v in result.items() if not k.startswith("_audit_")}
+
+
 def _detail(obj: Any) -> str:
     """span 详情：完整的输入/输出参数，供后台展开查看。"""
     text = json.dumps(obj, ensure_ascii=False, indent=2, default=str)
@@ -407,7 +420,7 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.id,
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                    "content": json.dumps(_for_model(result), ensure_ascii=False, default=str),
                 })
         else:
             stop_reason = "max_steps"

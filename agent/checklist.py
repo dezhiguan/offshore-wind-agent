@@ -131,10 +131,43 @@ def _from_work_order(result: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _from_remote_reset(result: dict[str, Any]) -> dict[str, Any] | None:
+    """第 4.1 条五款逐条摊开，不靠模型转述。
+
+    实测同一道题跑两轮：一轮写「第 4.1 条已命中第 2 款（24 小时内 4 次）、第 3 款
+    （手册要求断电检查/更换单板）、第 5 款（涉及母线电压与功率回路）」，另一轮只写
+    「不能继续反复远程复位」，一款都没提。规则引擎两轮算出的 `逐款核对` 完全相同，
+    差别只在模型这轮想不想写 —— 那就别让它决定。
+
+    状态口径与其他清单一致，但语义相反要小心：这里「成立」是禁止情形成立，
+    是明确的坏消息（blocked）；「不成立」才是 ok。
+    """
+    rows = (result.get("facts") or {}).get("逐款核对")
+    if not rows:
+        return None
+    items = []
+    for r in rows:
+        verdict = r.get("结论", "")
+        items.append({
+            "label": r.get("款", ""),
+            "state": "blocked" if verdict == "成立" else ("ok" if verdict == "不成立" else "pending"),
+            "note": r.get("依据") or ("需现场核实并留痕" if verdict not in ("成立", "不成立") else ""),
+            "verdict": verdict,
+        })
+    return {
+        "key": "remote_reset_ban",
+        "title": "禁止远程复位 · 第 4.1 条逐款核对",
+        "clause": "规程第 4.1 条",
+        "subject": "",
+        "items": items,
+    }
+
+
 BUILDERS = {
     "replace_precondition": _from_replace,
     "close_compliance": _from_close,
     "work_order_assessment": _from_work_order,
+    "remote_reset_ban": _from_remote_reset,
 }
 
 
