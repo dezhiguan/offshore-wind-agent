@@ -31,6 +31,12 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 admin_router = APIRouter(tags=["后台管理"])
 
+# 页面本身不缓存。整个前端就是这一个文件（没有带 hash 的打包产物），FileResponse
+# 默认又不发 Cache-Control，浏览器于是按启发式自己决定缓存多久 —— 改完前端普通
+# 刷新可能还是旧的，而后端已经是新的：新页面去读旧接口没有的字段，看起来像功能
+# 坏了，实际排查的是一个不存在的 bug。数据接口那边每个都已经各自带了 no-store。
+_NO_STORE = {"Cache-Control": "no-store"}
+
 
 class RunRequest(BaseModel):
     ids: list[str] = Field(default_factory=list, max_length=40)
@@ -39,7 +45,7 @@ class RunRequest(BaseModel):
 @admin_router.get("/admin")
 def admin_page() -> FileResponse:
     """后台单页：左侧切换「Agent 质量中心」与「链路追踪」。"""
-    return FileResponse(STATIC_DIR / "admin.html")
+    return FileResponse(STATIC_DIR / "admin.html", headers=_NO_STORE)
 
 
 @admin_router.get("/api/eval")
