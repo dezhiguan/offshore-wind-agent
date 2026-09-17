@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 from agent.checklist import build as build_checklists
+from tools.pricing import basis as price_basis
 
 H_CONCLUSION = "结论"
 H_BASIS = "依据"
@@ -97,5 +99,18 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
             # 本次会话实际进入上下文的语料占比，供界面展示与事后审计
             "budget": run.get("budget"),
             "model": run.get("model"),
+            # 成本是按核对过的官方单价算的，还是落到兜底价的估算
+            "price_basis": price_basis(run.get("model") or ""),
         },
     }
+
+
+def stamp_served(result: dict[str, Any], started: float) -> dict[str, Any]:
+    """补上端到端服务耗时。
+
+    ``meta.elapsed_ms`` 只量到链路收口那一刻，解析三段、生成核实清单、接地校验
+    都在表外。差值实测只有几毫秒，但"总耗时"这个词说的是用户等了多久，
+    差一点也不该由读的人自己去猜哪一段没算进去。
+    """
+    result.setdefault("meta", {})["served_ms"] = int((time.monotonic() - started) * 1000)
+    return result

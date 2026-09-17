@@ -91,6 +91,8 @@ button.run:disabled{opacity:.42;cursor:default}
 /* 口径旁白：指标下面那句"这个数字是怎么来的、样本是谁" */
 .note{font-size:11.5px;color:var(--muted);line-height:1.7;margin:11px 2px 0}
 .note b{color:var(--ink-2)}
+.note.warn{color:var(--warn);background:var(--warn-soft);border-radius:6px;padding:9px 12px}
+.note.warn b{color:var(--warn)}
 
 /* ── 分节 ── */
 section.blk{margin-bottom:26px}
@@ -335,6 +337,10 @@ dialog.ansdlg::backdrop{background:rgba(10,20,23,.42)}
   white-space:nowrap;line-height:1.3}
 .strip .x{font-size:10px;color:var(--crit);margin-top:2px;line-height:1.4}
 .strip .x.mute{color:var(--muted)}
+/* 失败是红的，护栏拒绝与估算单价是黄的：两者性质不同，颜色不能同一档 */
+.strip .x.bad,.strip .x b.bad{color:var(--crit)}
+.strip .x.warn,.strip .x b.warn{color:var(--warn)}
+.strip .x b{font-weight:400}
 .dsec{padding:18px 22px 20px}
 
 tr.det td{background:var(--sunken);padding:0}
@@ -535,7 +541,8 @@ function spanTable(spans) {
     <tbody>${spans.map(s => `<tr>
       <td><span class="tg ${s.kind}">${s.kind}</span>
         <div class="spn">${esc(s.name)}</div>
-        ${s.detail ? `<div class="spd">${esc(s.detail)}</div>` : ''}</td>
+        ${s.detail ? `<div class="spd">${esc(s.detail)}</div>` : ''}
+        ${s.guard ? `<div class="spd">护栏 · ${esc(s.guard)}</div>` : ''}</td>
       <td>${esc(clip(s.input, 130)) || '—'}</td>
       <td>${esc(clip(s.output, 170)) || '—'}</td>
       <td class="num">${s.elapsed_ms}ms</td>
@@ -611,6 +618,17 @@ async function loadEval() {
   // 用例集变过就不能直接比：11 条时的准确率和 26 条时的不是一回事
   const sameSet = !BASELINE || tr.baseline.total === t.total;
   if (!sameSet) BASELINE = null;
+  // 产物是"每条用例最近一次结果"的拼盘，不是一次完整评测。跨度大或配置不一致时，
+  // 这张表在跨批次求平均——不说出来，看的人会把拼盘当成一次跑测的结论
+  const b = d.batch || {};
+  const older = (b.total || 0) - (b.recent || 0);
+  const batchNote = !b.total ? '' : `产物落盘 <b>${esc(b.first_at)} → ${esc(b.last_at)}</b>${
+    b.span_minutes >= 60 ? `（跨 ${Math.floor(b.span_minutes / 60)} 小时 ${b.span_minutes % 60} 分）` :
+    b.span_minutes ? `（跨 ${b.span_minutes} 分钟）` : ''}${
+    older ? ` · 最近一轮 ${b.recent} 条，其余 ${older} 条是更早留下的` : ' · 同一轮跑出'} · 模型 ${
+    esc((b.models || []).join(' / ') || '—')} · 接地 ${esc((b.groundings || []).join(' / ') || '—')}${
+    b.mixed ? '　⚠ 配置不一致：这张表是跨配置结果的拼盘，不能当作一次评测的结论。' : ''}`;
+
   const trendNote = BASELINE
     ? `涨跌为与上一轮评测（<b>${esc(tr.baseline.at)}</b>${
         tr.baseline.ran ? ` · 那轮跑了 ${tr.baseline.ran} 条` : ''}）相比：
@@ -634,11 +652,12 @@ async function loadEval() {
             `<span><b>${s.passed}/${s.total}</b>${esc(s.label)}</span>`).join('')}</div>
         </div>
       </div>
-      <p class="note">${trendNote}</p></section>
+      <p class="note">${trendNote}</p>
+      ${batchNote ? `<p class="note${b.mixed ? ' warn' : ''}">${batchNote}</p>` : ''}</section>
 
     <section class="blk">${hd('执行健康', '过程是否按预期收口')}
       <div class="grid">
-        ${metric('任务完成率', 'NON-EMPTY', m('task_completion').value, '%',
+        ${metric('任务完成率', 'ANSWERED', m('task_completion').value, '%',
                  m('task_completion').note, grade(m('task_completion').value, 95, 80),
                  delta('task_completion'))}
         ${metric('工具调用成功率', 'BY CALL', m('tool_success').value, '%',
@@ -661,11 +680,11 @@ async function loadEval() {
                  '', delta('cost_per_task'))}
       </div></section>
 
-    <section class="blk">${hd('上下文红线', '进入模型上下文的语料占比 · 峰值')}
+    <section class="blk">${hd('上下文红线', '读到了多少语料 · 去重口径 · 峰值')}
       <div class="meters">
-        ${meter('数据行', t.peak_db_rows_pct, 50,
-          '题面要求不得将整个数据库放入上下文。系统在每次工具调用前预检，累计超阈值即拒绝并要求收窄查询。')}
-        ${meter('文档字符', t.peak_doc_chars_pct, 70,
+        ${meter('数据行覆盖', t.peak_db_rows_pct, 50,
+          '题面要求不得将整个数据库放入上下文。系统在每次工具调用前预检，<b>覆盖</b>（去重）与<b>累计取回</b>（含重复）任一超阈值即拒绝并要求收窄查询。')}
+        ${meter('文档字符覆盖', t.peak_doc_chars_pct, 70,
           '文档侧阈值放宽到 <b>70%</b>：一个复杂合规问题天然需要 5~8 个条款加一节手册，定在 50% 会误伤正常取证。')}
       </div></section>
 
@@ -701,7 +720,7 @@ function onlineRow(t) {
     <td>${esc(clip(t.question, 54))}${t.notes?.length
       ? `<div class="probe">${esc(clip(t.notes.map(n => n.kind).join('、'), 44))}</div>` : ''}</td>
     <td><span class="pill ${cls}">${esc(t.status)}</span></td>
-    <td class="num">${t.elapsed_ms ? (t.elapsed_ms / 1000).toFixed(1) + 's' : '—'}</td>
+    <td class="num">${t.elapsed_ms ? ((t.served_ms ?? t.elapsed_ms) / 1000).toFixed(1) + 's' : '—'}</td>
     <td class="num">${t.steps ?? '—'}</td>
     <td class="num">${t.unverifiable_count ? t.unverifiable_count + ' 项' : '—'}</td>
     <td class="num">${cost != null ? '¥' + cost.toFixed(4) : '—'}</td>
@@ -748,8 +767,9 @@ async function loadOnline() {
 
     <section class="blk">${hd('回答可用性', '答了什么 · 拒了什么 · 标了什么')}
       <div class="grid">
-        ${metric('有效回答率', 'NON-EMPTY', s.answer_rate, '%',
-                 `${s.answered} / ${s.count} 次产出非空回答`, grade(s.answer_rate, 95, 80))}
+        ${metric('有效回答率', 'ANSWERED', s.answer_rate, '%',
+                 `${s.answered} / ${s.count} 次产出可用回答${
+                   s.refused ? `（拒答 ${s.refused} 次不计）` : ''}`, grade(s.answer_rate, 95, 80))}
         ${metric('未取证拒答率', 'REFUSED', s.refused_rate, '%',
                  `${s.refused} 次未调用任何工具，宁可不答 —— 护栏生效，不是故障`)}
         ${metric('标注存疑占比', 'FLAGGED', s.flagged_rate, '%',
@@ -763,7 +783,8 @@ async function loadOnline() {
     <section class="blk">${hd('执行健康', '过程是否按预期收口')}
       <div class="grid">
         ${metric('工具调用成功率', 'BY CALL', s.tool_success_rate, '%',
-                 `${s.tool_calls} 次调用 · ${s.tool_failures} 次失败`,
+                 `${s.tool_calls} 次调用 · ${s.tool_failures} 次失败${
+                   s.tool_refused ? `（护栏拒绝 ${s.tool_refused} 次不计入分母）` : ''}`,
                  grade(s.tool_success_rate, 95, 85))}
         ${metric('模型调用成功率', 'BY CALL', s.model_success_rate, '%',
                  `${s.model_calls} 次调用 · ${s.model_failures} 次失败`,
@@ -784,13 +805,19 @@ async function loadOnline() {
                  : '¥' + s.avg_cost.toFixed(4), '', `累计 ¥${(s.total_cost || 0).toFixed(4)}`)}
       </div></section>
 
-    <section class="blk">${hd('上下文红线', '真实提问把语料压到了哪 · 峰值')}
+    <section class="blk">${hd('上下文红线', '真实提问读到了多少语料 · 峰值')}
       <div class="meters">
-        ${meter('数据行', s.peak_db_rows_pct, 50,
-          '线上峰值。每次工具调用前预检，累计超阈值即拒绝并要求收窄查询 —— 真实提问比用例发散，这条水位是看护栏有没有被逼到线上的地方。')}
-        ${meter('文档字符', s.peak_doc_chars_pct, 70,
-          '线上峰值。文档侧阈值放宽到 <b>70%</b>：一个复杂合规问题天然需要 5~8 个条款加一节手册。')}
-      </div></section>
+        ${meter('数据行覆盖', s.peak_db_rows_pct, 50,
+          '线上峰值，<b>去重口径</b>：同一批行被两条 SQL 各查一次只算一次。每次工具调用前预检，覆盖档与累计取回档任一超阈值即拒绝并要求收窄查询。')}
+        ${meter('文档字符覆盖', s.peak_doc_chars_pct, 70,
+          '线上峰值，<b>去重口径</b>：同一节先被检索命中、后被整节取回，按见过的最大篇幅算一次。文档侧阈值放宽到 <b>70%</b>：一个复杂合规问题天然需要 5~8 个条款加一节手册。')}
+      </div>
+      <p class="note">这两条是<b>语料覆盖率</b>，回答"读到了随题资料的百分之多少"。
+        工具返回真正注入上下文的字符数另计（含 JSON 结构与规则结论，不是语料原文），
+        线上峰值 <b>${(s.peak_context_chars ?? 0).toLocaleString()}</b> 字符 —— 两个数问的不是同一件事，
+        混成一个百分比会同时把覆盖率说高、把上下文占用说低。${
+          s.usage_missing_calls ? `<br>另有 <b>${s.usage_missing_calls}</b> 次模型调用因异常打断未测到用量，Token 与成本未含这部分。` : ''}</p>
+    </section>
 
     <section class="blk">${hd('最近问答', '点击任意一行到链路追踪逐段复核')}
       <div id="otable"></div>
@@ -883,7 +910,7 @@ function openAnswer() {
         <h3>${esc(d.question)}</h3>
         <div class="ids">${esc(d.short_id || '')} · ${
           SRC_LABEL[d.source === 'eval' ? 'eval' : 'online']} · ${esc(d.model || '')} · ${
-          esc(d.at || '')} · ${((d.elapsed_ms || 0) / 1000).toFixed(2)}s</div>
+          esc(d.at || '')} · ${(((d.served_ms ?? d.elapsed_ms) || 0) / 1000).toFixed(2)}s</div>
       </div>
       <button class="x" type="button" aria-label="关闭">✕</button>
     </div>
@@ -928,7 +955,7 @@ function traceRow(t) {
         <span class="src ${src}">${SRC_LABEL[src]}</span>
         <span class="sid">${esc((t.short_id || '').slice(0, 6))}</span></span>
       <span class="meta" title="${esc(srcs)}">${esc(t.at || '')} · ${
-        ((t.elapsed_ms || 0) / 1000).toFixed(2)}s · ${esc(srcs || '—')}</span>
+        (((t.served_ms ?? t.elapsed_ms) || 0) / 1000).toFixed(2)}s · ${esc(srcs || '—')}</span>
     </span></div>`;
 }
 
@@ -1020,6 +1047,8 @@ async function selectTrace(id) {
     s.model_failures ? `<span class="bd crit">MODEL FAIL ×${s.model_failures}</span>` : '',
     `<span class="bd">${steps > 1 ? 'MULTI-STEP' : 'SINGLE-STEP'} ×${steps}</span>`,
     s.tool_failures ? `<span class="bd crit">TOOL FAIL ×${s.tool_failures}</span>` : '',
+    /* 护栏拦下的调用与工具失败分开报：前者是红线生效，后者是工具坏了 */
+    s.tool_refused ? `<span class="bd warn">护栏拦截 ×${s.tool_refused}</span>` : '',
     d.unverifiable?.length ? `<span class="bd warn">无法确认 ${d.unverifiable.length} 项</span>` : '',
   ].filter(Boolean).join('');
 
@@ -1030,7 +1059,8 @@ async function selectTrace(id) {
           ? '<button class="viewbtn" type="button" onclick="openAnswer()">查看结果</button>' : ''}</div>
       <div class="ids">${esc(d.short_id || '')} · ${
         SRC_LABEL[d.source === 'eval' ? 'eval' : 'online']} · ${esc(d.model || '')} · ${esc(d.at || '')}
-        · 上下文 ${(b.db_rows_pct ?? 0).toFixed(1)}% 行 / ${(b.doc_chars_pct ?? 0).toFixed(1)}% 文档</div>
+        · <span title="${esc(budgetTitle(b))}">语料覆盖 ${(b.db_rows_pct ?? 0).toFixed(1)}% 行 / ${
+          (b.doc_chars_pct ?? 0).toFixed(1)}% 文档</span></div>
       <div class="badges">${badges}</div>
     </div>
     ${d.notes?.length ? `<div class="anom">
@@ -1038,18 +1068,26 @@ async function selectTrace(id) {
       <ul>${d.notes.map(n => `<li><b>${esc(n.kind)}</b>：${esc(clip(n.text, 240))}</li>`).join('')}</ul>
     </div>` : ''}
     <div class="strip">
-      <div><b>总耗时</b><div class="v">${(d.elapsed_ms / 1000).toFixed(2)}s</div>
-        <div class="x mute">${s.span_count || 0} span</div></div>
+      <div><b>总耗时</b><div class="v" title="${esc(elapsedTitle(d))}">${
+        ((d.served_ms ?? d.elapsed_ms) / 1000).toFixed(2)}s</div>
+        <div class="x mute">${s.span_count || 0} span${
+          d.served_ms && d.elapsed_ms ? ' · 收口 ' + (d.served_ms - d.elapsed_ms) + 'ms' : ''}</div></div>
       <div><b>模型调用</b><div class="v">${s.model_calls || 0}</div>
         <div class="x${s.model_failures ? '' : ' mute'}">${
           s.model_failures ? s.model_failures + ' 失败' : '全部成功'}</div></div>
       <div><b>Token</b><div class="v">${(s.prompt_tokens || 0) + (s.completion_tokens || 0)}</div>
-        <div class="x mute">缓存命中 ${s.cached_tokens || 0}</div></div>
+        <div class="x${s.usage_missing_calls ? ' bad' : ' mute'}"${
+          s.usage_missing_calls ? ' title="失败的调用同样计费，但流式被打断时拿不到用量，这里不拿零冒充"' : ''}>缓存命中 ${
+          s.cached_tokens || 0}${s.usage_missing_calls ? ` · ${s.usage_missing_calls} 次未计量` : ''}</div></div>
       <div><b>工具调用</b><div class="v">${s.tool_calls || 0}</div>
-        <div class="x${s.tool_failures ? '' : ' mute'}">${
-          s.tool_failures ? s.tool_failures + ' 失败' : '全部成功'}</div></div>
+        <div class="x mute">${
+          /* 失败标红、护栏拒绝标黄：一个是工具坏了，一个是红线生效，同色会读成一回事 */
+          [s.tool_failures ? `<b class="bad">${s.tool_failures} 失败</b>` : '',
+           s.tool_refused ? `<b class="warn" title="护栏按上下文红线拒绝放行，工具本身跑通了 —— 不计入失败，也不进成功率的分母">${
+             s.tool_refused} 护栏拒绝</b>` : '',
+           (!s.tool_failures && !s.tool_refused) ? '全部成功' : ''].filter(Boolean).join(' · ')}</div></div>
       <div><b>成本</b><div class="v">¥${(s.cost_cny || 0).toFixed(4)}</div>
-        <div class="x mute">按官方单价</div></div>
+        ${priceNote(d.price_basis)}</div>
     </div>
     <div class="dsec">
       <h4 style="font-size:9.5px;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;
@@ -1059,6 +1097,32 @@ async function selectTrace(id) {
         color:var(--muted);margin:14px 0 10px;font-weight:600">Span 明细</h4>
       ${spanTable(d.spans || [])}
     </div>`;
+}
+
+/** 成本那一格的小字。价目表外的模型会落到兜底价，那是估算不是账单，必须说出来。 */
+function priceNote(pb) {
+  if (!pb || !pb.model) return '<div class="x mute">按官方单价</div>';
+  if (pb.known) return `<div class="x mute" title="${esc(pb.model)} · 入 ${pb.input_per_1k} / 出 ${
+    pb.output_per_1k} / 缓存 ${pb.cached_input_per_1k} 元每千 token">按官方单价 · ${esc(pb.checked_at)} 核对</div>`;
+  return `<div class="x warn" title="${esc(pb.model)} 不在已核对的价目表里${
+    pb.overridden ? '（单价被环境变量覆盖）' : '，按兜底单价估算'}：入 ${pb.input_per_1k} / 出 ${
+    pb.output_per_1k} / 缓存 ${pb.cached_input_per_1k}">${pb.overridden ? '按覆盖单价' : '估算 · 单价未核对'}</div>`;
+}
+
+/** 总耗时的悬停说明：链路收口那一刻之后还有解析、核实清单、接地校验。 */
+function elapsedTitle(d) {
+  if (!d.served_ms || !d.elapsed_ms) return '链路耗时';
+  return `端到端 ${(d.served_ms / 1000).toFixed(2)}s = 链路 ${
+    (d.elapsed_ms / 1000).toFixed(2)}s + 收口 ${d.served_ms - d.elapsed_ms}ms（解析三段 / 核实清单 / 接地校验）`;
+}
+
+/** 上下文那一行的悬停说明：覆盖是去重的，取回不是，两个数都要给。 */
+function budgetTitle(b) {
+  if (!b || b.db_rows_total == null) return '';
+  return [`语料覆盖（去重）：${b.db_rows} / ${b.db_rows_total} 行 · ${b.doc_chars} / ${b.doc_chars_total} 字符`,
+    `累计取回（含重复）：${b.db_rows_drawn ?? b.db_rows} 行 · ${b.doc_chars_drawn ?? b.doc_chars} 字符`,
+    `工具返回注入上下文：${b.context_chars ?? '—'} 字符（含 JSON 结构与结论文本，不是语料原文）`,
+    `红线：${b.limit_rows} 行 / ${b.limit_chars} 字符，两档任一超限即拒绝取证`].join('\n');
 }
 
 async function loadTraces() {

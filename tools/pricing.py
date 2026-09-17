@@ -11,6 +11,10 @@
 from __future__ import annotations
 
 import os
+from typing import Any
+
+# 价目核对日期。改单价必须同时改它，否则界面上"按官方单价"会一直停在旧日期。
+PRICES_CHECKED_AT = "2026-09-15"
 
 # 元 / 1K token
 DEFAULT_RATES = {
@@ -21,14 +25,48 @@ DEFAULT_RATES = {
 FALLBACK = {"input": 0.0008, "output": 0.0027, "cached_input": 0.0001}
 
 
+# 缓存输入相对标准输入的折扣。qwen 系列官方明码 0.1 / 0.8 = 1/8。
+# 只覆盖了输入价却没覆盖缓存价时，按这个比例推导 —— 保留另一个模型的**绝对**
+# 缓存价，会算出一张两个模型混起来的账，而缓存命中常年占六成以上，误差全落在总账上。
+CACHED_INPUT_RATIO = 1 / 8
+
+
 def rates(model: str) -> dict[str, float]:
-    override = os.getenv("LLM_PRICE_INPUT_PER_1K"), os.getenv("LLM_PRICE_OUTPUT_PER_1K")
     base = dict(DEFAULT_RATES.get(model, FALLBACK))
-    if override[0]:
-        base["input"] = float(override[0])
-    if override[1]:
-        base["output"] = float(override[1])
+    env_in = os.getenv("LLM_PRICE_INPUT_PER_1K")
+    env_out = os.getenv("LLM_PRICE_OUTPUT_PER_1K")
+    env_cached = os.getenv("LLM_PRICE_CACHED_INPUT_PER_1K")
+    if env_in:
+        base["input"] = float(env_in)
+        base["cached_input"] = base["input"] * CACHED_INPUT_RATIO
+    if env_out:
+        base["output"] = float(env_out)
+    if env_cached:
+        base["cached_input"] = float(env_cached)
     return base
+
+
+def basis(model: str) -> dict[str, Any]:
+    """这次的成本是按什么价算的 —— 界面据此决定写"官方单价"还是"估算"。
+
+    价目表外的模型会落到 FALLBACK（flash 的价），数字照样算得出来，
+    但那是估算不是账单。不把这件事带到界面上，"按官方单价"就成了一句
+    无论如何都会显示的话。
+    """
+    known = is_known(model)
+    overridden = any(os.getenv(k) for k in
+                     ("LLM_PRICE_INPUT_PER_1K", "LLM_PRICE_OUTPUT_PER_1K",
+                      "LLM_PRICE_CACHED_INPUT_PER_1K"))
+    r = rates(model)
+    return {
+        "model": model,
+        "known": known and not overridden,
+        "overridden": overridden,
+        "checked_at": PRICES_CHECKED_AT if known and not overridden else None,
+        "input_per_1k": r["input"],
+        "output_per_1k": r["output"],
+        "cached_input_per_1k": r["cached_input"],
+    }
 
 
 def cost(model: str, prompt_tokens: int, completion_tokens: int,

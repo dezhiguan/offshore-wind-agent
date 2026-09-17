@@ -172,6 +172,7 @@ def load() -> dict[str, Any]:
             "at_ts": stamped,
             "tool_calls": ts.get("tool_calls"),
             "tool_failures": ts.get("tool_failures"),
+            "tool_refused": ts.get("tool_refused"),
             "tool_success_rate": ts.get("tool_success_rate"),
             "model_calls": ts.get("model_calls"),
             "tokens": (ts.get("prompt_tokens", 0) or 0) + (ts.get("completion_tokens", 0) or 0),
@@ -284,6 +285,10 @@ def metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
     # 按用例平均会让只调一次工具的简单题和调十次的复杂题权重相同。
     tc = sum(i.get("tool_calls") or 0 for i in items)
     tf = sum(i.get("tool_failures") or 0 for i in items)
+    # 护栏按红线拒绝的调用不进分母：工具没失败，是结果按红线没被放行。
+    # 与线上档（tracestore.stats）同一口径，两档口径不同就没法互相印证。
+    tr_ = sum(i.get("tool_refused") or 0 for i in items)
+    tj = tc - tr_
 
     lat = [i["elapsed_ms"] for i in items if i.get("elapsed_ms")]
     toks = [i["tokens"] for i in items if i.get("tokens")]
@@ -294,8 +299,10 @@ def metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
         "task_completion": {"value": _pct(completed, n),
                             "note": "%d / %d 条产出可用回答%s" % (
                                 completed, n, "（拒答 %d 条不计）" % refused if refused else "")},
-        "tool_success": {"value": _pct(tc - tf, tc) if tc else None,
-                         "note": "%d 次调用 · %d 次失败" % (tc, tf) if tc else "无数据"},
+        "tool_success": {"value": _pct(tj - tf, tj) if tj else None,
+                         "note": ("%d 次调用 · %d 次失败%s" % (
+                             tc, tf, "（护栏拒绝 %d 次不计入分母）" % tr_ if tr_ else ""))
+                             if tc else "无数据"},
         "chain_completion": {"value": _pct(normal, n),
                              "note": "%d / %d 条正常收口（未撞步数上限）%s" % (
                                  normal, n, "· 其中 %d 条链路内有降级或工具失败" % rough if rough else "")},

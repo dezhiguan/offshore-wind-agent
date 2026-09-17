@@ -13,6 +13,11 @@ span 分五类，与它和模型的关系对应：
   GUARD   护栏判定（只读守卫、上下文预算、未取证拦截）
 
 状态三档：OK / DEGRADED（降级但继续，例如预算拦截后改写查询）/ ERROR。
+
+**DEGRADED 不是失败**（2026-09-17 修）：护栏按红线拒绝一次取数，工具本身跑通了，
+是系统不让结果进上下文。把它记进 ``tool_failures`` 会让「工具调用成功率」被自家
+护栏拉低 —— 那个指标就不再指示"工具靠不靠谱"。因此拒绝单独计数，且从成功率的
+**分母里剔除**：既没成功也没失败的一次调用，放进分母的哪一边都是错的。
 """
 from __future__ import annotations
 
@@ -94,8 +99,13 @@ class Trace:
     def summary(self) -> dict[str, Any]:
         model = [s for s in self.spans if s.kind == "MODEL"]
         model_failed = [s for s in model if s.status == ERROR]
+        # 用量没测到的调用（流式被异常打断，usage 还没到）。token 与成本那两格
+        # 要据此标注"另有 N 次未计量"，否则缺失会被读成零。
+        unmetered = [s for s in model if s.extra.get("usage_missing")]
         calls = [s for s in self.spans if s.kind in ("TOOL", "RAG", "RULE")]
         failed = [s for s in calls if s.status == ERROR]
+        refused = [s for s in calls if s.status == DEGRADED]
+        judged = len(calls) - len(refused)
         return {
             "total_ms": int((time.monotonic() - self.started) * 1000),
             "span_count": len(self.spans),
@@ -103,9 +113,12 @@ class Trace:
             "model_failures": len(model_failed),
             "model_success_rate": round((len(model) - len(model_failed)) / len(model) * 100, 1)
                                   if model else None,
+            "usage_missing_calls": len(unmetered),
             "tool_calls": len(calls),
             "tool_failures": len(failed),
-            "tool_success_rate": round((len(calls) - len(failed)) / len(calls) * 100, 1) if calls else None,
+            # 护栏拒绝：工具跑通了，是红线不让结果进上下文
+            "tool_refused": len(refused),
+            "tool_success_rate": round((judged - len(failed)) / judged * 100, 1) if judged else None,
             "degraded": sum(1 for s in self.spans if s.status == DEGRADED),
             "prompt_tokens": sum(s.extra.get("prompt_tokens", 0) for s in model),
             "completion_tokens": sum(s.extra.get("completion_tokens", 0) for s in model),
