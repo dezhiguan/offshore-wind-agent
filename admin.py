@@ -41,6 +41,16 @@ def admin_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "admin.html")
 
 
+@admin_router.get("/admin/answer")
+def answer_page() -> FileResponse:
+    """单条回答的独立页面。
+
+    追踪页要回答的是「哪一步出了问题」，正文夹在 span 中间会把执行链路顶到屏幕外；
+    而回答本身往往要整篇读、甚至打印带走。两种读法塞进一个滚动区里互相干扰。
+    """
+    return FileResponse(STATIC_DIR / "answer.html")
+
+
 @admin_router.get("/api/eval")
 def eval_results(response: Response) -> dict:
     """离线评测只读接口。数据来自 eval/run.py 的落盘产物，不做任何持久化。"""

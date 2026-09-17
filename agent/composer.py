@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from agent.checklist import build as build_checklists
+
 H_CONCLUSION = "结论"
 H_BASIS = "依据"
 H_UNVERIFIABLE = "现有资料无法确认"
@@ -78,6 +80,8 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
         "answer": parts.get(H_CONCLUSION, "").strip() or draft.strip(),
         "basis": _as_items(parts.get(H_BASIS, "")),
         "unverifiable": unverifiable,
+        # 把规则判定转成现场核实清单：同一份数据，从「我不知道」变成「你要去办的几件事」
+        "checklists": build_checklists(evidence),
         "sources": _detect_sources(evidence),
         "evidence": evidence,
         "trace": run.get("trace", []),

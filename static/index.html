@@ -60,6 +60,31 @@ button.go:disabled{opacity:.5;cursor:default}
 .chip{font-size:12px;font-family:var(--mono);padding:3px 9px;border-radius:4px;
   background:var(--accent-soft);color:var(--accent);border:1px solid var(--line)}
 
+/* 现场核实清单：三态必须视觉可分——
+   已确认（系统查到）／明确不满足（已知坏消息）／待现场核实（系统边界） */
+.ckl{background:var(--surface);border:1px solid var(--line);border-radius:8px;
+  padding:16px 18px;margin-bottom:14px}
+.ckl h3{font-size:.85rem;font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted);margin:0 0 4px;font-weight:600}
+.ckl .sub{font-size:12px;color:var(--muted);margin-bottom:12px}
+.ckl .tally{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;margin-bottom:12px}
+.ckl .tally b{font-family:var(--mono);font-size:15px;margin-right:4px}
+.ckl .tally .ok{color:var(--ok)} .ckl .tally .bk{color:var(--crit)} .ckl .tally .pd{color:var(--warn)}
+.ckl ul{list-style:none;margin:0;padding:0}
+.ckl li{display:flex;gap:10px;padding:8px 0;border-bottom:1px dashed var(--line);font-size:13.5px}
+.ckl li:last-child{border-bottom:0}
+.ckl .mk{flex:0 0 18px;width:18px;height:18px;border-radius:4px;display:flex;align-items:center;
+  justify-content:center;font-size:11px;font-weight:700;margin-top:2px}
+.ckl .mk.ok{background:var(--ok-soft);color:var(--ok)}
+.ckl .mk.blocked{background:var(--crit-soft);color:var(--crit)}
+.ckl .mk.pending{background:var(--surface-2);color:var(--muted);border:1px dashed var(--line-strong)}
+.ckl .txt{min-width:0}
+.ckl .txt .l{line-height:1.5}
+.ckl li.pending .txt .l{color:var(--ink-2)}
+.ckl .txt .n{font-size:11.5px;color:var(--muted);margin-top:2px;line-height:1.5}
+.ckl .foot{font-size:11.5px;color:var(--muted);margin-top:11px;padding-top:10px;
+  border-top:1px solid var(--line);line-height:1.6}
+
 .alert{border-left:3px solid var(--warn);background:var(--warn-soft);
   border-radius:0 8px 8px 0;padding:14px 18px;margin-bottom:14px}
 .alert h3{margin:0 0 6px;font-size:.9rem;color:var(--warn)}
@@ -102,7 +127,7 @@ th{color:var(--muted);font-weight:600}
 .draft{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin-bottom:14px}
 .draft h3{font-size:.85rem;font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase;
   color:var(--muted);margin:0 0 10px;font-weight:600}
-.draft .body{font-size:15px;white-space:pre-wrap;line-height:1.72}
+.draft .dbody{font-size:15px;white-space:pre-wrap;line-height:1.72}
 .draft .sec{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.11em;
   text-transform:uppercase;color:var(--muted);font-weight:600;margin:14px 0 4px}
 .draft .sec:first-child{margin-top:0}
@@ -204,6 +229,26 @@ function rows(t) {
     '</tbody></table></div>';
 }
 
+const MARK = {ok: '✓', blocked: '✕', pending: ''};
+function checklistCard(c) {
+  const t = c.counts;
+  return `<div class="ckl">
+    <h3>${esc(c.title)}</h3>
+    <div class="sub">${esc(c.clause)}${c.subject ? ' · ' + esc(c.subject) : ''}</div>
+    <div class="tally">
+      <span class="ok"><b>${t.ok}</b>项已确认</span>
+      ${t.blocked ? `<span class="bk"><b>${t.blocked}</b>项明确不满足</span>` : ''}
+      ${t.pending ? `<span class="pd"><b>${t.pending}</b>项待现场核实</span>` : ''}
+      <span style="color:var(--muted)">共 ${t.total} 项</span>
+    </div>
+    <ul>${c.items.map(i => `<li class="${i.state}">
+      <span class="mk ${i.state}">${MARK[i.state]}</span>
+      <span class="txt"><span class="l">${esc(i.label)}</span>
+        ${i.note ? `<span class="n">${esc(i.note)}</span>` : ''}</span></li>`).join('')}</ul>
+    ${t.pending ? `<div class="foot">空心项数据库没有记录，需现场逐项确认并留痕。
+      系统只读，不能代为确认，也不据此推定其已满足（规程第 5.2 条）。</div>` : ''}</div>`;
+}
+
 function render(d) {
   const P = [];
 
@@ -213,7 +258,10 @@ function render(d) {
 
   P.push(`<div class="card"><h3>回答</h3><div class="answer">${md(d.answer)}</div></div>`);
 
-  if (d.unverifiable?.length) P.push(`<div class="alert"><h3>现有资料无法确认，需要现场核实</h3><ul>${
+  // 有结构化清单时优先展示清单——它把「无法确认」从免责声明变成可执行的核实项。
+  // 清单只覆盖规程有明文条目的部分，剩余的自由文本说明仍以提示条呈现。
+  (d.checklists || []).forEach(c => P.push(checklistCard(c)));
+  if (d.unverifiable?.length) P.push(`<div class="alert"><h3>其他需现场核实的事项</h3><ul>${
     d.unverifiable.map(u => `<li>${md(u)}</li>`).join('')}</ul></div>`);
 
   if (d.sources?.length) P.push(`<div class="card"><h3>使用的数据源</h3><div class="chips">${
@@ -244,6 +292,21 @@ function render(d) {
 </p></div>`);
 
   return P.join('');
+}
+
+// 流式期间的实时视图：已完成的步骤逐条追加，末尾一条是进行中的状态。
+// 单次调用延迟压不下去，所以让等待过程可见——用户始终知道系统在做什么。
+function liveView(steps, note, draft) {
+  const trace = `<div class="live"><h3>查询过程</h3>
+    <ol class="steps">${steps.map(t =>
+      `<li><span class="tool">${esc(t.tool)}</span><span class="sum${t.ok ? '' : ' bad'}">${esc(t.summary)}</span></li>`).join('')}
+      ${draft ? '' : `<li class="pending"><span class="tool"><span class="spin"></span></span><span class="sum">${esc(note)}</span></li>`}
+    </ol><div class="tick" id="tick"></div></div>`;
+  // 答案边写边显示：首字时间从「等到最后」变成约两秒
+  const typing = draft
+    ? `<div class="draft"><h3>回答</h3><div class="dbody">${mdLive(draft)}<span class="caret"></span></div></div>`
+    : '';
+  return typing + trace;
 }
 
 $('#f').onsubmit = async e => {

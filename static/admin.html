@@ -150,6 +150,10 @@ section.blk{margin-bottom:26px}
 .runbar{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--accent);
   border-radius:0 var(--r) var(--r) 0;padding:14px 18px;margin-bottom:22px;display:none}
 .runbar.on{display:block}
+/* 执行进度条挂在三个视图之外（loadEval 每次重写 #v-eval，放进去会被冲掉），
+   所以换页时要显式收起来——它是离线评测的东西，跟着线上质量一起露脸就是串台。
+   用 .hide 而不是清掉 .on：跑完的那份结果得留着，切回来还在。 */
+.runbar.hide{display:none}
 .runbar .h{font-size:13px;font-weight:600}
 .runbar .h span{font-family:var(--mono);font-weight:400;color:var(--muted);margin-left:8px;font-size:12px}
 .runbar .cur{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);margin-top:5px;min-height:1.2em}
@@ -230,6 +234,16 @@ td.id{font-family:var(--mono);font-weight:600;color:var(--muted)}
   border-radius:3px;background:var(--surface-2);color:var(--muted);flex:0 0 auto;white-space:nowrap}
 .src.eval{background:var(--accent-soft);color:var(--accent)}
 .tlist .none{padding:26px;text-align:center;color:var(--muted);font-size:12.5px}
+.pager{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11.5px;color:var(--muted)}
+.pager .cnt{font-family:var(--mono);letter-spacing:.03em}
+.pager .grow{flex:1}
+.pager button{font:inherit;font-size:11.5px;padding:5px 13px;border-radius:6px;cursor:pointer;
+  background:var(--surface);color:var(--ink-2);border:1px solid var(--line-2);transition:background .12s}
+.pager button:hover:not(:disabled){background:var(--surface-2)}
+.pager button:disabled{opacity:.4;cursor:default}
+.pager select{font:inherit;font-size:11.5px;padding:5px 9px;border-radius:6px;
+  background:var(--surface);color:var(--ink-2);border:1px solid var(--line-2)}
+
 .tlist .more{padding:11px;text-align:center;color:var(--muted);font-family:var(--mono);
   font-size:10.5px;letter-spacing:.04em;border-top:1px dashed var(--line);background:var(--surface-2)}
 .tlist .more.done{opacity:.66}
@@ -243,41 +257,31 @@ td.id{font-family:var(--mono);font-weight:600;color:var(--muted)}
 .bd.ok{background:var(--ok-soft);color:var(--ok);border-color:transparent}
 .bd.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
 .bd.crit{background:var(--crit-soft);color:var(--crit);border-color:transparent}
-/* 回答挪到页头下方，默认收起：先看状态与异常，再决定要不要读全文；
-   点开就是全文，不再截断——之前压在页面最底下且有高度上限，长回答被切掉半句 */
-.fold{border-top:1px solid var(--line)}
-.fold>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:9px;
-  padding:12px 22px;font-size:12.5px;color:var(--ink-2);transition:background .12s}
-.fold>summary::-webkit-details-marker{display:none}
-.fold>summary:hover{background:var(--surface-2)}
-.fold>summary b{color:var(--ink);font-weight:600}
-.fold>summary .ar{font-size:9px;color:var(--muted);transition:transform .15s;
-  display:inline-block;width:9px}
-.fold[open]>summary .ar{transform:rotate(90deg)}
-.fold>summary .hint{margin-left:auto;font-family:var(--mono);font-size:10px;letter-spacing:.06em;
-  color:var(--muted)}
-.fold>summary .hint::after{content:'点开读全文'}
-.fold[open]>summary .hint::after{content:'收起'}
-.fold[open]>summary{border-bottom:1px solid var(--line)}
-.fold .in{padding:16px 22px 4px}
-.fold .in .ans{max-height:none}
+/* 回答单开一页看：追踪页要的是「哪一步出了问题」，正文夹在中间会把 span 顶到屏幕外 */
+.dt .qline{display:flex;align-items:flex-start;gap:14px}
+.dt .qline h3{flex:1 1 auto;min-width:0}
+a.viewbtn{flex:0 0 auto;font-size:12.5px;font-weight:500;padding:7px 14px;border-radius:7px;
+  background:var(--surface);color:var(--ink-2);border:1px solid var(--line-2);
+  text-decoration:none;white-space:nowrap;transition:background .12s,border-color .12s,color .12s}
+a.viewbtn:hover{background:var(--surface-2);border-color:var(--accent);color:var(--accent)}
 .anom{background:var(--warn-soft);border-top:1px solid var(--line);border-bottom:1px solid var(--line);
-  padding:16px 22px;margin:18px 0 0}
-.anom .t{font-size:13px;font-weight:600;color:var(--warn);margin-bottom:9px}
-.anom ul{margin:0;padding-left:16px;font-size:12.5px;color:var(--ink-2);line-height:1.75}
-.anom li{margin-bottom:5px}
+  padding:10px 20px;margin:0}
+.anom .t{font-size:11.5px;font-weight:600;color:var(--warn);margin-bottom:5px}
+.anom ul{margin:0;padding-left:15px;font-size:11.5px;color:var(--ink-2);line-height:1.6}
+.anom li{margin-bottom:2px}
 .anom li b{color:var(--ink)}
 .strip{display:flex;flex-wrap:wrap;border-top:1px solid var(--line);
   background:var(--surface-2);overflow:hidden}
 /* 必须是直接子元素：写成 .strip div 会把格子里的 .v / .x 也当成格子，
    于是数值和小字各自套一层内边距与分隔线——格子被撑到近两倍高，还多出一堆碎框 */
-.strip>div{flex:1 1 150px;min-width:0;padding:13px 15px;
+/* basis 压到 118px：五格要能并成一行，落到第二行就会有一格独占整行 */
+.strip>div{flex:1 1 118px;min-width:0;padding:9px 13px;
   box-shadow:1px 0 0 var(--line),0 1px 0 var(--line)}
-.strip b{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.11em;
-  text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:5px}
-.strip .v{font-family:var(--mono);font-size:1.02rem;font-variant-numeric:tabular-nums;
-  white-space:nowrap}
-.strip .x{font-size:10.5px;color:var(--crit);margin-top:3px}
+.strip b{display:block;font-family:var(--mono);font-size:9px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:3px}
+.strip .v{font-family:var(--mono);font-size:.92rem;font-variant-numeric:tabular-nums;
+  white-space:nowrap;line-height:1.3}
+.strip .x{font-size:10px;color:var(--crit);margin-top:2px;line-height:1.4}
 .strip .x.mute{color:var(--muted)}
 .dsec{padding:18px 22px 20px}
 
@@ -535,6 +539,12 @@ async function loadEval() {
    没取到证据而拒答、有没有把「现有资料无法确认」标出来、上下文压到了哪、
    一次问答花了多少。把它和离线那档并成一张表，等于用有标准答案的口径
    去解释没有标准答案的数据。 */
+/* 最近问答用**页码翻页**，不用链路追踪那种滚动续读：那边是一条窄列表，
+   边滚边扫；这里是一张八列的表，一滚表头就跑没了，翻页才是对的形状。
+   默认每页 10 条，可切 20 / 50。 */
+const PAGE_SIZES = [10, 20, 50];
+let ONLINE_ITEMS = [], OPAGE = 1, OSIZE = PAGE_SIZES[0];
+
 function onlineRow(t) {
   const srcs = (t.sources || []).map(x => x.replace(/（.*?）/, '')).join('、');
   const cls = t.status === 'SUCCESS' ? 'ok' : t.status === 'FAILED' ? 'no' : 'cut';
@@ -636,21 +646,62 @@ async function loadOnline() {
       </div></section>
 
     <section class="blk">${hd('最近问答', '点击任意一行到链路追踪逐段复核')}
-      <div class="tw"><table>
-        <colgroup><col style="width:104px"><col><col style="width:92px"><col style="width:72px">
-          <col style="width:58px"><col style="width:66px"><col style="width:84px">
-          <col style="width:118px"></colgroup>
-        <thead><tr><th>时间</th><th>问题</th><th>状态</th><th style="text-align:right">耗时</th>
-          <th style="text-align:right">步数</th><th style="text-align:right">存疑</th>
-          <th style="text-align:right">成本</th><th>数据源</th></tr></thead>
-        <tbody>${items.map(onlineRow).join('')}</tbody></table></div>
+      <div id="otable"></div>
     </section>`;
 
-  box.querySelectorAll('tr.row').forEach(tr => tr.onclick = () => {
+  ONLINE_ITEMS = items;
+  OPAGE = 1;              // 每次重新载入都回到第一页
+  renderOnlineTable();
+}
+
+function renderOnlineTable() {
+  const total = ONLINE_ITEMS.length;
+  const pages = Math.max(1, Math.ceil(total / OSIZE));
+  // 每页条数调大后，原来停的页码可能已经越界
+  if (OPAGE > pages) OPAGE = pages;
+  const from = (OPAGE - 1) * OSIZE;
+  const page = ONLINE_ITEMS.slice(from, from + OSIZE);
+
+  // 翻页条的显示门槛看**最小页长**而不是当前页长：否则切到「50 条/页」之后
+  // 控件自己消失，想切回 10 条都没地方切
+  const pager = total > PAGE_SIZES[0] ? `
+    <div class="pager">
+      <span class="cnt">共 ${total} 条 · 第 ${OPAGE} / ${pages} 页</span>
+      <span class="grow"></span>
+      <button class="pg" data-go="-1" ${OPAGE <= 1 ? 'disabled' : ''}>上一页</button>
+      <button class="pg" data-go="1" ${OPAGE >= pages ? 'disabled' : ''}>下一页</button>
+      <select class="psize">${PAGE_SIZES.map(n =>
+        `<option value="${n}"${n === OSIZE ? ' selected' : ''}>${n} 条/页</option>`).join('')}</select>
+    </div>` : '';
+
+  $('#otable').innerHTML = `
+    <div class="tw"><table>
+      <colgroup><col style="width:104px"><col><col style="width:92px"><col style="width:72px">
+        <col style="width:58px"><col style="width:66px"><col style="width:84px">
+        <col style="width:118px"></colgroup>
+      <thead><tr><th>时间</th><th>问题</th><th>状态</th><th style="text-align:right">耗时</th>
+        <th style="text-align:right">步数</th><th style="text-align:right">存疑</th>
+        <th style="text-align:right">成本</th><th>数据源</th></tr></thead>
+      <tbody>${page.map(onlineRow).join('')}</tbody></table></div>${pager}`;
+
+  $('#otable').querySelectorAll('tr.row').forEach(tr => tr.onclick = () => {
     // 带着这一条跳过去，落在追踪页最近一条上等于点了个碰运气的按钮
     FOCUS = Number(tr.dataset.id);
     show('traces');
   });
+  $('#otable').querySelectorAll('button.pg').forEach(b => b.onclick = () => {
+    OPAGE += Number(b.dataset.go);
+    renderOnlineTable();
+  });
+  const size = $('#otable .psize');
+  if (size) size.onchange = () => {
+    // 换页长后停在**原来那条记录所在的页**，而不是一律弹回第一页：
+    // 正在看第 3 页第 5 条，切成 20 条/页应当还在那条附近
+    const anchor = from;
+    OSIZE = Number(size.value);
+    OPAGE = Math.floor(anchor / OSIZE) + 1;
+    renderOnlineTable();
+  };
 }
 
 /* ── 链路追踪 ── */
@@ -756,23 +807,15 @@ async function selectTrace(id) {
 
   box.innerHTML = `
     <div class="dt">
-      <h3>${esc(d.question)}</h3>
+      <div class="qline"><h3>${esc(d.question)}</h3>${
+        (d.answer || d.unverifiable?.length)
+          ? `<a class="viewbtn" href="/admin/answer?trace=${d.id}" target="_blank"
+               rel="noopener">查看结果 ↗</a>` : ''}</div>
       <div class="ids">${esc(d.short_id || '')} · ${
         SRC_LABEL[d.source === 'eval' ? 'eval' : 'online']} · ${esc(d.model || '')} · ${esc(d.at || '')}
         · 上下文 ${(b.db_rows_pct ?? 0).toFixed(1)}% 行 / ${(b.doc_chars_pct ?? 0).toFixed(1)}% 文档</div>
       <div class="badges">${badges}</div>
     </div>
-    ${(d.answer || d.unverifiable?.length) ? `<details class="fold">
-      <summary><span class="ar">▶</span><b>回答</b>${
-        d.unverifiable?.length ? ` · 含无法确认 ${d.unverifiable.length} 项` : ''}
-        <span class="hint"></span></summary>
-      <div class="in">
-        <div class="ans">${text(d.answer) || '（无）'}</div>
-        ${d.unverifiable?.length ? `<h4 style="font-size:9.5px;font-family:var(--mono);
-          letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 10px;
-          font-weight:600">现有资料无法确认（${d.unverifiable.length} 项）</h4>
-          <div class="ans">${d.unverifiable.map(u => '· ' + text(u)).join('\n')}</div>` : ''}
-      </div></details>` : ''}
     ${d.notes?.length ? `<div class="anom">
       <div class="t">${d.status === 'FAILED' ? '本次链路中断，未产出回答' : '本次链路未按主路径完成'}</div>
       <ul>${d.notes.map(n => `<li><b>${esc(n.kind)}</b>：${esc(clip(n.text, 240))}</li>`).join('')}</ul>
@@ -907,8 +950,9 @@ function show(name) {
     b.classList.toggle('on', b.dataset.t === v.tab));
   $('#vtitle').textContent = v.t;
   $('#vsub').textContent = v.s;
-  // 执行按钮只属于离线评测：跑的是 eval/ 下的固定用例，与线上流量无关
+  // 执行入口与执行进度条都只属于离线评测：跑的是 eval/ 下的固定用例，与线上流量无关
   ['#runAll', '#runSel'].forEach(sel => $(sel).style.display = name === 'eval' ? '' : 'none');
+  $('#runbar')?.classList.toggle('hide', name !== 'eval');
   if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
   v.load();
 }
