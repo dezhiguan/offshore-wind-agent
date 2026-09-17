@@ -293,8 +293,6 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
             # 本次会话实际进入上下文的语料占比，供界面展示与事后审计
             "budget": run.get("budget"),
             "model": run.get("model"),
-            # 快路径：认没认出来、接没接管、影子档下与模型自己查的是否一致
-            "fastpath": run.get("fastpath") or {},
             # 成本是按核对过的官方单价算的，还是落到兜底价的估算
             "price_basis": price_basis(run.get("model") or ""),
         },

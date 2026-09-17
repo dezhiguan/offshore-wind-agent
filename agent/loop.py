@@ -28,9 +28,7 @@ from openai import OpenAI
 from agent.prompts import SYSTEM_PROMPT
 from agent.tools_spec import TOOLS, TOOL_REGISTRY
 from agent.tracing import DEGRADED, ERROR, OK, TOOL_KIND, Trace
-from tools import fastpath
 from tools.budget import ContextBudget, measure
-from tools.db import query_db
 from tools.pricing import cost as price_of
 from tools.rules import cited_sections
 
@@ -42,8 +40,6 @@ MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "6"))
 MAX_UNGROUNDED_RETRIES = 1
 # 提示词强制的第一个二级标题，用作"最终答案已开始"的分界
 ANSWER_MARKER = "## 结论"
-# 快路径注入那一轮的 tool_call_id。固定值即可：一次问答最多注入一次。
-_FASTPATH_CALL_ID = "fastpath-1"
 # qwen3 系列默认开启 thinking，单次调用可达 30 秒，现场演示不可接受。
 # 关闭后靠工具与规则引擎保证正确性，而不是靠模型的内部推理。
 ENABLE_THINKING = os.getenv("ENABLE_THINKING", "false").lower() in {"1", "true", "yes"}
@@ -322,85 +318,6 @@ def warm_up() -> None:
     corpus_totals()
 
 
-def _apply_fastpath(question: str, messages: list[dict[str, Any]], trace: list[dict[str, Any]],
-                    tr: Trace, evidence: dict[str, list[dict[str, Any]]],
-                    budget: ContextBudget) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """第一次决策调用之前：形状认得出来的简单查询，由代码直接发。
-
-    省掉的那一次调用实测 P50 2.5 秒，占一步题总耗时的 38%——它做的事只是把
-    「T06 的最新告警是什么」翻译成一条 SQL，而这类问句的形状是固定的。
-
-    **这不是终局**：接管的只是第一次工具调用，循环照常往下走。查错了方向或数据不够，
-    模型自己会再调工具，最坏情况是上下文里多一份没用上的结果（且它照常计入预算），
-    而不是拿错数据作答。风险上界由这条性质兜着，不由判据兜着。
-    """
-    plan = fastpath.match(question)
-    note: dict[str, Any] = {"mode": fastpath.MODE, "matched": plan["name"] if plan else None}
-    if not plan:
-        return note, None
-
-    note["why"], note["sql"] = plan["why"], plan["sql"]
-    result = query_db(plan["sql"])
-    bad = fastpath.shape_ok(plan, result)
-    if bad:
-        note["skipped"] = bad
-        return note, result
-    if fastpath.MODE != "enforce":
-        note["skipped"] = "影子档：照常比对，不接管"
-        return note, result
-
-    draw = measure("query_db", result)
-    refusal = budget.would_exceed(draw)
-    if refusal:
-        # 快路径自己撞上红线就直接让位。**不记护栏拦截**：这一步不是模型要查的，
-        # 记进去会让"护栏触发次数"里混进系统自己的试探，那个数就不再指示模型行为。
-        note["skipped"] = "上下文预算不允许：%s" % refusal[:60]
-        return note, result
-    budget.charge(draw)
-
-    args = {"sql": plan["sql"]}
-    span = tr.start(TOOL_KIND["query_db"], "query_db")
-    span.close(input_summary=json.dumps(args, ensure_ascii=False)[:160],
-               output_summary=_summarize("query_db", result),
-               input_detail=_detail(args), output_detail=_detail(result),
-               status=OK, fastpath=plan["name"])
-    entry = {"step": 1, "tool": "query_db", "input": args, "ok": True,
-             "refused": False, "fastpath": plan["name"],
-             "summary": _summarize("query_db", result)}
-    trace.append(entry)
-    _collect_evidence(evidence, "query_db", args, result)
-
-    # 伪造一轮"模型发起了这次调用"的对话。格式与真实轮完全一致，后续逻辑无需分叉；
-    # 而这一步是谁发起的，靠 span 与 trace 上的 fastpath 标记如实标出，不冒充模型决策。
-    messages.append({"role": "assistant", "content": "",
-                     "tool_calls": [{"id": _FASTPATH_CALL_ID, "type": "function",
-                                     "function": {"name": "query_db",
-                                                  "arguments": json.dumps(args, ensure_ascii=False)}}]})
-    messages.append({"role": "tool", "tool_call_id": _FASTPATH_CALL_ID,
-                     "content": json.dumps(_for_model(result), ensure_ascii=False, default=str)})
-    note["applied"] = True
-    return note, result
-
-
-def _fastpath_verdict(note: dict[str, Any], fast_result: dict[str, Any] | None,
-                      evidence: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    """影子档的标定结论：如果当时接管了，查到的与模型自己查的是不是同一批行。
-
-    只有这个数能回答"切 enforce 安不安全"。命中率高而一致率低，说明判据认错了题——
-    那种情况下接管会把另一个问题的答案喂给模型。
-    """
-    if not note.get("matched") or note.get("applied") or fast_result is None:
-        return note
-    first = (evidence.get("tables") or [None])[0]
-    if first is None:
-        note["agreed"] = None
-        note["agree_note"] = "模型这一轮没有查库，无从比对"
-    else:
-        note["agreed"] = fastpath.agrees(fast_result, first)
-        note["agree_note"] = "与模型首条查询%s" % ("一致" if note["agreed"] else "不一致")
-    return note
-
-
 def run_agent(question: str) -> dict[str, Any]:
     """跑一轮问答，返回最终结果。内部复用流式实现，避免两套逻辑漂移。"""
     result: dict[str, Any] = {}
@@ -438,10 +355,6 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
     ungrounded_retries = 0
 
     yield {"type": "thinking", "message": "正在判断需要查询哪些资料…"}
-
-    fast_note, fast_result = _apply_fastpath(question, messages, trace, tr, evidence, budget)
-    if fast_note.get("applied"):
-        yield {"type": "step", "step": trace[-1]}
 
     # 失败也要能被复核：把已发生的 span 连同异常一起带出去，由调用方留存链路。
     try:
@@ -549,7 +462,6 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
     except Exception as exc:
         raise AgentRunFailed(exc, {
             "question": question,
-            "fastpath": fast_note,
             "answer": "",
             "basis": [],
             "unverifiable": [],
@@ -573,7 +485,6 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
         "type": "done",
         "result": {
             "draft": draft,
-            "fastpath": _fastpath_verdict(fast_note, fast_result, evidence),
             "trace": trace,
             "evidence": evidence,
             "stop_reason": stop_reason,

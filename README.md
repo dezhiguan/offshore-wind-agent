@@ -68,15 +68,13 @@ agent/
   prompts.py        系统提示词（注入 schema，不注入表数据）
   tools_spec.py     工具 JSON Schema 声明与执行注册表
   loop.py           Function Calling 循环
-  composer.py       两段解析 + 依据渲染 + 证据与数据源汇总
+  composer.py       三段解析 + 证据与数据源汇总
   grounding.py      接地校验（默认 shadow）
   replay.py         离线回放
 tools/
   db.py             四层只读守卫 + schema 提示词
   retriever.py      标题切块 + BM25 + 故障码/条款号映射
   rules.py          六条规程规则，纯函数，零 LLM 依赖
-  budget.py         上下文预算：合计档 + 单份文档档，每次工具调用前预检
-  fastpath.py       简单问题快路径：认得出形状的单条查询由代码直发（默认 shadow）
 data/               随题资料副本，只读引用
 static/index.html   问答界面
 static/admin.html   后台管理（Agent 质量中心 + 链路追踪，左侧切换）

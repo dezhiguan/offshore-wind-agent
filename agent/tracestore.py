@@ -110,8 +110,6 @@ def record(question: str, result: dict[str, Any], *, source: str = "online",
             # 接地校验（shadow 档只标注、不改回答）。不留存的话影子跑等于白跑：
             # 判定层要先标定再切 enforce，而标定靠的就是这批结果。
             "grounding": meta.get("grounding") or {},
-            # 快路径影子标定：不留存的话影子跑等于白跑，切 enforce 就只能靠猜
-            "fastpath": meta.get("fastpath") or {},
             # 三段标题解析成功与否，决定上面两个回答类指标该不该被照字面读
             "format_parsed": meta.get("format_parsed"),
             "budget": meta.get("budget") or {},
@@ -216,15 +214,6 @@ def stats(source: str | None = None) -> dict[str, Any]:
                       if (t.get("grounding") or {}).get("mode")})
     # 三段格式没解析出来的链路：回答类指标要照这个数打折看
     format_fallback = sum(1 for t in items if t.get("format_parsed") is False)
-
-    # 快路径：命中率与一致率必须分开看。命中率高而一致率低，说明判据认错了题——
-    # 那正是切 enforce 会把另一个问题的答案喂给模型的情形。
-    fps = [t.get("fastpath") or {} for t in items]
-    fp_modes = sorted({f.get("mode") for f in fps if f.get("mode")})
-    fp_matched = sum(1 for f in fps if f.get("matched"))
-    fp_applied = sum(1 for f in fps if f.get("applied"))
-    fp_judged = [f for f in fps if f.get("agreed") is not None]
-    fp_agreed = sum(1 for f in fp_judged if f.get("agreed"))
     return {
         "count": len(items),
         "capacity": MAX_TRACES,
@@ -262,15 +251,6 @@ def stats(source: str | None = None) -> dict[str, Any]:
         "grounding_flagged_rate": round(g_flagged / len(checked) * 100, 1) if checked else None,
         "grounding_flagged_items": sum(len(t["grounding"].get("flagged") or []) for t in checked),
         "format_fallback": format_fallback,
-        "fastpath_mode": "、".join(fp_modes) if fp_modes else None,
-        "fastpath_matched": fp_matched,
-        "fastpath_matched_rate": round(fp_matched / len(items) * 100, 1),
-        "fastpath_applied": fp_applied,
-        # 一致率的分母只有"两边都查了库"的那些：模型没查库就无从比对，
-        # 混进分母会把"没得比"算成"比对失败"
-        "fastpath_compared": len(fp_judged),
-        "fastpath_agreed": fp_agreed,
-        "fastpath_agree_rate": round(fp_agreed / len(fp_judged) * 100, 1) if fp_judged else None,
         # 延迟的样本数与链路条数不一定相等：没测到耗时的那些进不了分位数
         "latency_samples": len(lat),
         "latency_by_tools": buckets,
