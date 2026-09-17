@@ -145,15 +145,6 @@ section.blk{margin-bottom:26px}
   color:var(--muted);margin-top:8px}
 .cap-note{font-size:11.5px;color:var(--muted);line-height:1.65;margin-top:12px}
 
-/* 版本管理：指纹由若干要素构成，逐项列出才能看出是哪一项被改过 */
-.fp{display:grid;grid-template-columns:repeat(auto-fit,minmax(142px,1fr));gap:12px 20px}
-.fp div b{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.11em;
-  text-transform:uppercase;color:var(--muted);font-weight:600;margin-bottom:4px}
-.fp div span{font-family:var(--mono);font-size:12.5px;color:var(--ink)}
-.fp div span.bad{color:var(--crit);font-weight:700}
-.chg{margin:5px 0 0;padding-left:15px;font-size:11.5px;color:var(--ink-2);line-height:1.75}
-.pill.mute{background:var(--surface-2);color:var(--muted)}
-.cap-note b{color:var(--ink-2)}
 
 /* 执行进度 */
 .runbar{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--accent);
@@ -349,12 +340,6 @@ table.spans thead th{background:var(--surface)}
         <circle cx="12.5" cy="12" r="1.6"/><path d="M5 7.2 11 4.6M5 8.8 11 11.4"/></svg>
       <span class="lb">链路追踪<small>span 明细</small></span>
     </button>
-    <button data-v="versions" data-nav="versions">
-      <svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
-        stroke-linejoin="round"><path d="M8 1.8 1.8 4.9 8 8l6.2-3.1L8 1.8Z"/>
-        <path d="M1.8 8 8 11.1 14.2 8"/><path d="M1.8 11.1 8 14.2l6.2-3.1"/></svg>
-      <span class="lb">版本管理<small>台账与运行指纹</small></span>
-    </button>
   </nav>
 </aside>
 
@@ -382,7 +367,6 @@ table.spans thead th{background:var(--surface)}
   <section class="view on" id="v-eval"><p class="empty">加载中…</p></section>
   <section class="view" id="v-online" style="display:none"><p class="empty">加载中…</p></section>
   <section class="view" id="v-traces" style="display:none"><p class="empty">加载中…</p></section>
-  <section class="view" id="v-versions" style="display:none"><p class="empty">加载中…</p></section>
 </div>
 
 </div>
@@ -893,57 +877,6 @@ async function loadTraces() {
   selectTrace(focus);
 }
 
-/* ── 版本管理 ── */
-// 七要素里布尔与比例不能直接印出来：true/0.5 看不出是什么
-const fpval = (k, v) => k === 'thinking' ? (v ? 'on' : 'off')
-  : (k === 'row_ratio' || k === 'doc_ratio') ? (v * 100).toFixed(0) + '%' : String(v);
-
-async function loadVersions() {
-  const d = await api('/api/versions'), box = $('#v-versions');
-  const f = d.fields || {}, cfg = d.config || {}, drift = d.drift || [];
-  const bad = k => drift.some(x => x.key === k);
-
-  box.innerHTML = `
-    <section class="blk">${hd('当前运行', `指纹由影响行为的 ${Object.keys(f).length} 项要素算出`)}
-      <div class="gate">
-        <div>
-          <div class="big${drift.length ? ' bad' : ''}">${esc(d.current)}</div>
-          <div class="cap">${drift.length
-            ? `与台账声明<b>不一致</b> · ${drift.length} 项被改过`
-            : '与台账声明<b>一致</b>'}<br>运行指纹 <b>${esc(d.fingerprint)}</b>　台账声明 <b>${
-              esc(d.declared_fingerprint || '—')}</b></div>
-        </div>
-        <div class="fp">${Object.keys(f).map(k =>
-          `<div><b>${esc(f[k])}</b><span class="${bad(k) ? 'bad' : ''}">${
-            esc(fpval(k, cfg[k]))}</span></div>`).join('')}</div>
-      </div>
-      ${drift.length ? `<div class="anom" style="margin:0;border-radius:0 0 var(--r) var(--r)">
-        <div class="t">实际跑的与台账登记的不是同一套配置</div>
-        <ul>${drift.map(x => `<li><b>${esc(x.label)}</b>：台账声明 ${
-          esc(fpval(x.key, x.declared))}，实际生效 ${esc(fpval(x.key, x.actual))}</li>`).join('')}</ul>
-      </div>` : ''}
-      <div class="cap-note">工具集 ${(d.tools || []).map(t => `<span class="chip">${esc(t)}</span>`).join('')}
-        <br>配置的真相是环境变量与代码，这一页只负责如实呈现与核对，不从后台改运行时。</div>
-    </section>
-
-    <section class="blk">${hd('版本台账', '登记在 agent/versions.py · 动了八要素就加一条并改 CURRENT')}
-      <div class="tw"><table>
-        <colgroup><col style="width:76px"><col style="width:102px"><col style="width:82px">
-          <col><col style="width:84px"></colgroup>
-        <thead><tr><th>版本</th><th>日期</th><th>状态</th><th>变更点</th><th>指纹</th></tr></thead>
-        <tbody>${(d.ledger || []).map(e => `<tr>
-          <td class="id">${esc(e.version)}</td>
-          <td style="white-space:nowrap">${esc(e.date)}</td>
-          <td><span class="pill ${e.running ? 'ok' : 'mute'}">${e.running ? '运行中' : '历史'}</span></td>
-          <td><b>${esc(e.summary)}</b>
-            <ul class="chg">${(e.changes || []).map(c => `<li>${esc(c)}</li>`).join('')}</ul></td>
-          <td class="num">${esc(e.fingerprint)}</td></tr>`).join('')}</tbody></table></div>
-      <div class="cap-note">指纹只覆盖会改变回答的要素，<b>不含数据与文档内容</b>——换了语料指纹不动，
-        那属于语料版本，不是 agent 版本。同指纹的两个版本（如 V1.1 与 V1.0）差异只在可观测性一侧，
-        决策行为没有变化。</div>
-    </section>`;
-}
-
 /* ── 视图切换 ──
    三个视图、两个左轨条目：质量中心的两档（离线评测 / 线上质量）共用一个
    导航位，用分段控件切换。nav 字段决定左轨哪一条高亮，tab 字段决定分段
@@ -956,8 +889,6 @@ const VIEW = {
            s: '线上质量 · 用户在问答页真实问出来的那些，没有标准答案，只看系统留下的痕迹'},
   traces: {t: '链路追踪', nav: 'traces', tab: '', load: loadTraces,
            s: '逐段复核 agent 的执行过程，线上与回归的链路都在这里，进程内留存'},
-  versions: {t: 'Agent 版本管理', nav: 'versions', tab: '', load: loadVersions,
-           s: '版本台账是声明，运行指纹是现算的 —— 用来确认此刻跑的到底是不是登记的那一版'},
 };
 // 左轨点回质量中心时停在上一次看的那一档——切到追踪页再切回来被打回离线档，
 // 等于把人正在看的东西换掉了

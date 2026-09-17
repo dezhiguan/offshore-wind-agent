@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""后台管理页面：Agent 质量中心、链路追踪与版本管理，合并为一页，左侧切换。
+"""后台管理页面：Agent 质量中心与链路追踪，合并为一页，左侧切换。
 
 质量中心里再分两档，两者口径不同，不能并成一张表看：
   · 离线评测 —— 固定用例 + 断言，有标准答案，判得出对错，数据来自 eval/run.py 的落盘产物；
@@ -22,7 +22,7 @@ from fastapi import APIRouter, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent import evalview, grounding, tracestore, versions
+from agent import evalview, grounding, tracestore
 from agent.composer import compose
 from agent.loop import AgentRunFailed, run_agent
 
@@ -37,7 +37,7 @@ class RunRequest(BaseModel):
 
 @admin_router.get("/admin")
 def admin_page() -> FileResponse:
-    """后台单页：左侧切换「Agent 质量中心」「链路追踪」「版本管理」。"""
+    """后台单页：左侧切换「Agent 质量中心」与「链路追踪」。"""
     return FileResponse(STATIC_DIR / "admin.html")
 
 
@@ -110,13 +110,6 @@ def eval_run(req: RunRequest) -> StreamingResponse:
 
     return StreamingResponse(events(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-
-@admin_router.get("/api/versions")
-def version_overview(response: Response) -> dict:
-    """版本台账与运行指纹。台账是声明，指纹从当前进程实际生效的配置现算。"""
-    response.headers["Cache-Control"] = "no-store"
-    return versions.overview()
 
 
 @admin_router.get("/api/traces")
