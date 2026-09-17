@@ -229,6 +229,62 @@ class TestCloseCompliance:
         assert "更换" in row["命中词"]
 
 
+class TestSubjectResolution:
+    """判定对象的两种握法之间要能互换，别逼模型自己推断。
+
+    工具描述承诺了「给工单编号即可」，而 priority_required 的签名里没有
+    work_order_id——这个参数会被过滤掉，只给工单号拿不到判定。模型于是自己
+    补了个故障码：两次实测问「T05 的 WO-260705 优先级对不对」，分别编了
+    24001 和 24003。24001 那次尤其危险，T05 确实有 24001，规则照常返回了一个
+    有效结论（应为 NORMAL），只是回答的不是被问的问题。
+    """
+
+    @pytest.mark.parametrize("rule", ["repeat_fault", "priority_required",
+                                      "work_order_assessment", "remote_reset_ban"])
+    def test_work_order_id_alone_is_enough(self, rule):
+        r = check_rule(rule, work_order_id="WO-260705")
+        assert r["ok"] is True
+        assert r["判定对象来源"] == "由工单 WO-260705 定位到 T05 / 24005"
+        assert "未指定" not in r["verdict"]        # 不该退化成通则
+
+    def test_priority_resolved_from_order_is_emergency(self):
+        """换算出来的判定要和直接传参一致，不能只是"没报错"。"""
+        by_order = check_rule("priority_required", work_order_id="WO-260705")
+        by_pair = check_rule("priority_required", turbine_id="T05", fault_code="24005")
+        assert by_order["required_priority"] == by_pair["required_priority"] == "EMERGENCY"
+
+    def test_conflicting_fault_code_is_called_out(self):
+        """传了工单号又自己带一个对不上的故障码——正是编造的形态。
+
+        不能悄悄挑一个用：挑工单的会掩盖模型在瞎猜，挑传入的会答错问题。
+        """
+        r = check_rule("priority_required", work_order_id="WO-260705",
+                       turbine_id="T05", fault_code="24003")
+        assert r["ok"] is False
+        assert "24005" in r["error"] and "24003" in r["error"]
+
+    @pytest.mark.parametrize("rule", ["close_compliance", "replace_precondition"])
+    def test_turbine_and_code_resolve_to_order(self, rule):
+        r = check_rule(rule, turbine_id="T08", fault_code="24010")
+        assert r["判定对象来源"] == "由 T08 / 24010 定位到工单 WO-260707"
+
+    def test_unknown_work_order_does_not_fall_back_to_general(self):
+        r = check_rule("priority_required", work_order_id="WO-999999")
+        assert "不存在" in r["verdict"]
+        assert "未指定" not in r["verdict"]
+
+    def test_pair_without_work_order_is_explicit(self):
+        """T07/24012 有告警但没工单，换算不出来要说清楚，不能静默走通则。"""
+        r = check_rule("close_compliance", turbine_id="T07", fault_code="24012")
+        assert "不存在" in r["verdict"]
+
+    def test_general_question_still_gets_general_clauses(self):
+        """不传任何 id 的泛问不受影响，仍返回通则条款。"""
+        r = check_rule("close_compliance")
+        assert r["is_general"] is True
+        assert "6.2" in r["clauses"]
+
+
 class TestReplacePrecondition:
     def test_nine_items_checked_seven_unverifiable(self):
         r = check_rule("replace_precondition", work_order_id="WO-260707")

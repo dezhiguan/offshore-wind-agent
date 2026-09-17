@@ -772,10 +772,90 @@ def clause_sections(result: dict[str, Any]) -> list[dict[str, Any]]:
     return sections
 
 
+# 六条规则的判定对象分两种握法：四条认「风机 + 故障码」，两条认工单号。
+# 但提问的人未必按这个分界提问——「WO-260705 的优先级对不对」给的是工单号，
+# 要的却是 priority_required。
+_BY_TURBINE_FAULT = ("repeat_fault", "priority_required",
+                     "work_order_assessment", "remote_reset_ban")
+_BY_WORK_ORDER = ("close_compliance", "replace_precondition")
+
+
+def _resolve_subject(rule: str, kwargs: dict[str, Any]) -> tuple[dict[str, Any], str | None,
+                                                                 dict[str, Any] | None]:
+    """在工单号与「风机 + 故障码」之间互换，补齐规则真正需要的那一种。
+
+    起因是工具描述承诺了「你只需要给出风机编号、故障代码**或工单编号**」，
+    而 priority_required 的签名里没有 work_order_id —— 这个参数会被 accepted
+    过滤掉，只给工单号拿不到判定。模型于是自己补了一个故障码：两次实测分别
+    编了 24001 和 24003，都是问「T05 的 WO-260705 优先级对不对」。
+
+    24001 那次尤其危险：T05 确实有 24001，规则照常返回了一个**有效**结论
+    （应为 NORMAL），只是回答的不是被问的问题；模型靠后续查库自己纠正了，
+    但它没有任何理由必须纠正。空集守卫挡得住编出来的不存在组合，挡不住
+    这种「编中了」的——所以要消掉它编的动机，而不是只加一道拦。
+
+    返回 (补齐后的参数, 定位说明, 提前返回的结果)。
+    """
+    args = dict(kwargs)
+    wo = (args.get("work_order_id") or "").strip()
+    tid = (args.get("turbine_id") or "").strip().upper()
+    code = (args.get("fault_code") or "").strip()
+
+    # 只要带了工单号就进来：既补齐缺的，也核对带来的——两者都传且对不上，
+    # 正是编造的形态，比只缺一个更该说破。
+    if rule in _BY_TURBINE_FAULT and wo:
+        wo = _lit(wo, _RE_WO, "工单编号")
+        rows = _rows("SELECT turbine_id, fault_code FROM maintenance_records "
+                     "WHERE work_order_id='%s'" % wo)
+        if not rows:
+            return args, None, {
+                "ok": True, "rule": rule,
+                "verdict": "数据库中不存在工单 %s，无法据此定位风机与故障码。" % wo,
+                "facts": {"查询条件": {"work_order_id": wo}},
+                "unverifiable": [], "clauses": []}
+        o = rows[0]
+        # 传了工单号又自己带了一个对不上的故障码——正是编造的形态，必须挡下来说破，
+        # 不能悄悄挑一个用：挑工单的会掩盖模型在瞎猜，挑传入的会答错问题。
+        if (tid and tid != o["turbine_id"]) or (code and code != o["fault_code"]):
+            return args, None, {
+                "ok": False,
+                "error": "工单 %s 对应的是 %s / %s，与传入的 turbine_id=%s、fault_code=%s 不一致。"
+                         "请以工单记录为准，不要自行推断风机编号或故障代码。"
+                         % (wo, o["turbine_id"], o["fault_code"], tid or "（未传）", code or "（未传）")}
+        args["turbine_id"], args["fault_code"] = o["turbine_id"], o["fault_code"]
+        return args, "由工单 %s 定位到 %s / %s" % (wo, o["turbine_id"], o["fault_code"]), None
+
+    if rule in _BY_WORK_ORDER and not wo and tid and code:
+        tid = _lit(tid, _RE_TURBINE, "风机编号")
+        code = _lit(code, _RE_CODE, "故障代码")
+        rows = _orders(tid, code)
+        if not rows:
+            return args, None, {
+                "ok": True, "rule": rule,
+                "verdict": "数据库中不存在 %s / %s 的维检工单，无从判定。" % (tid, code),
+                "facts": {"查询条件": {"turbine_id": tid, "fault_code": code}},
+                "unverifiable": [], "clauses": []}
+        if len(rows) > 1:
+            return args, None, {
+                "ok": False,
+                "error": "%s / %s 对应多张工单：%s。请指定 work_order_id 再调用本规则。"
+                         % (tid, code, "、".join(r["work_order_id"] for r in rows))}
+        args["work_order_id"] = rows[0]["work_order_id"]
+        return args, "由 %s / %s 定位到工单 %s" % (tid, code, rows[0]["work_order_id"]), None
+
+    return args, None, None
+
+
 def check_rule(rule: str, **kwargs) -> dict[str, Any]:
     fn = RULES.get(rule)
     if fn is None:
         return {"ok": False, "error": "未知规则 %r，可用：%s" % (rule, "、".join(RULES))}
+    try:
+        kwargs, locator, early = _resolve_subject(rule, kwargs)
+    except RuleInputError as exc:
+        return {"ok": False, "error": str(exc)}
+    if early is not None:
+        return early
     accepted = fn.__code__.co_varnames[:fn.__code__.co_argcount]
     args = {k: v for k, v in kwargs.items() if k in accepted and v is not None}
     missing = [a for a in REQUIRED_ARGS.get(rule, ()) if a not in args]
@@ -785,7 +865,11 @@ def check_rule(rule: str, **kwargs) -> dict[str, Any]:
         result["sources"] = ["safety_regulation"]
         return _attach_clause_texts(result)
     try:
-        return _attach_clause_texts(_run_tracking_sources(fn, args))
+        result = _attach_clause_texts(_run_tracking_sources(fn, args))
+        if locator:
+            # 换算过就把换算过程写进结果：判定对象是怎么定下来的，必须可回溯
+            result["判定对象来源"] = locator
+        return result
     except RuleInputError as exc:
         return {"ok": False, "error": str(exc)}
     except TypeError as exc:
