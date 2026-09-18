@@ -417,3 +417,50 @@ class TestCoverageIsPerRule:
 """, rules=[_sweep("repeat_fault"), _per_subject("close_compliance")]))
         assert out["meta"]["coverage_rules"] == {
             "swept": ["repeat_fault"], "per_subject": ["close_compliance"]}
+
+
+class TestToolNamesScrubbed:
+    """内部工具名不进给人看的正文。
+
+    提示词已经写了禁止，但实测同一道题两轮跑，一轮干净、一轮写出
+    「check_rule 判定命中第 4.1 条」「工具判定不构成重复故障」——措辞类要求靠
+    提示词只能压低频率，压不到零，所以再加一道确定性的收口。
+    """
+
+    def test_tool_name_replaced_in_answer(self):
+        draft = "## 结论\ncheck_rule 判定命中第 4.1 条第 2 款。\n"
+        out = compose("Q", {"draft": draft, "evidence": {}, "trace": []})
+        assert "check_rule" not in out["answer"]
+        # 不能洗成「规程判定 判定命中」：紧跟的那个名词要一起吃掉
+        assert out["answer"].strip() == "规程判定命中第 4.1 条第 2 款。"
+
+    def test_tool_verdict_phrase_replaced(self):
+        draft = "## 结论\n工具判定不构成重复故障。\n"
+        out = compose("Q", {"draft": draft, "evidence": {}, "trace": []})
+        assert out["answer"].strip() == "规程判定不构成重复故障。"
+
+    def test_scrub_applies_to_unverifiable_items(self):
+        draft = ("## 结论\nA\n\n## 现有资料无法确认\n"
+                 "- query_db 未记录母线电压，需现场核实。\n")
+        out = compose("Q", {"draft": draft, "evidence": {}, "trace": []})
+        assert out["unverifiable"] == ["数据库查询未记录母线电压，需现场核实。"]
+
+    def test_table_names_and_content_untouched(self):
+        """洗的是工具名，不是表名——表名是资料的名字，现场看得懂也该看见。
+
+        「工具」在现场多指扳手这类实物，同样不能泛洗。
+        """
+        draft = ("## 结论\n按 alarm_records 与 maintenance_records 核对，"
+                 "作业前须备齐力矩扳手等工具。\n")
+        out = compose("Q", {"draft": draft, "evidence": {}, "trace": []})
+        assert "alarm_records" in out["answer"]
+        assert "maintenance_records" in out["answer"]
+        assert "力矩扳手等工具" in out["answer"]
+
+    def test_basis_keeps_tool_names(self):
+        """依据面板与链路追踪要照原样展示 SQL 和工具名，洗掉就没法追执行过程。"""
+        run = {"draft": "## 结论\nA\n", "trace": [], "evidence": {
+            "tables": [{"sql": "SELECT * FROM alarm_records WHERE turbine_id='T03'",
+                        "rows": []}]}}
+        out = compose("Q", run)
+        assert any("alarm_records" in b for b in out["basis"])

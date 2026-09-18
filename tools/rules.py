@@ -400,6 +400,55 @@ def _manual_requires_deenergize_or_board(manual: str) -> tuple[str | None, str |
     return None, None
 
 
+# 第 4.1(5) 款判的是**故障本身**涉及母线电压或功率回路，不是「修它之前要先把母线放电」。
+# 上一版是 `any(k in manual ...)`，整节裸词命中——与上面 4.1(3) 已经修掉的那个 bug 同一
+# 形状，当时漏改了这一款。实测手册九个故障码里有三个命中，命中句无一例外落在
+# 「故障处理注意事项」，讲的全是更换或检查前的作业前置条件：
+#     24002  更换接口板或通讯模块前，应确认……母线电压降至约 20 V 的安全范围
+#     24005  检查前必须确保功率回路断电，并确认母线已经完全放电
+#     24010  完成挂牌上锁、验电，并确认母线电压降至约 20 V 的安全范围
+# 拿这些句子判「故障涉及母线电压」，等于把每一条「换件前要放电」的安全提示都读成故障性质。
+# 这三个码当时都已由 4.1(1)/(2)/(3) 命中，结论没翻，但答案里明着写出了「命中第 5 款」
+# ——引错条款，现场一追问就露馅（Q5 连跑两轮都写了这一款）。
+#
+# 改判据：只在描述故障本身的小节里找（控制原理 / 触发条件 / 原因分析及解决方案），
+# 「故障处理注意事项」整节排除；告警名称本身带这两个词也算成立。
+# 判不成立时要把原因带出来：「手册只在注意事项里提过」和「手册压根没提」是两回事，
+# 前者正是这次误判的形状，不写清楚下次还会有人照着裸词命中改回去。
+# 按「注意事项」匹配而不是写死「故障处理注意事项」：手册各节的小标题目前是统一的，
+# 但判据不该押在标题一个字都不改上——漏掉一节，这一款就又退回裸词命中。
+_WORK_SAFETY_SECTIONS = ("注意事项",)
+
+
+def _fault_nature_text(manual: str) -> str:
+    """只保留描述故障本身的小节，丢掉讲作业前置条件的「故障处理注意事项」。"""
+    kept, skipping = [], False
+    for line in manual.split("\n"):
+        if line.lstrip().startswith("####"):
+            skipping = any(s in line for s in _WORK_SAFETY_SECTIONS)
+        if not skipping:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def _involves_power_circuit(alarms: list[dict[str, Any]], manual: str) -> tuple[bool, str]:
+    """第 4.1(5) 款。返回（是否成立, 依据说明）。"""
+    names = " ".join(a.get("fault_name") or "" for a in alarms)
+    for key in _BAN_POWER_CIRCUIT:
+        if key in names:
+            return True, "告警名称含「%s」" % key
+
+    for sentence in _SENT_SPLIT.split(re.sub(r"\s+", "", _fault_nature_text(manual))):
+        if any(key in sentence for key in _BAN_POWER_CIRCUIT):
+            return True, "手册原句：%s" % sentence
+
+    if any(key in manual for key in _BAN_POWER_CIRCUIT):
+        return False, ("手册本节只在「故障处理注意事项」里提到母线电压 / 功率回路，"
+                       "讲的是更换或检查前的作业前置条件，不是故障本身的性质，"
+                       "不属于第 4.1(5) 款所指情形")
+    return False, "手册本节未提及母线电压或功率回路"
+
+
 def remote_reset_ban(turbine_id: str, fault_code: str) -> dict[str, Any]:
     """规程第 4.1 条：五种情形任一成立即禁止远程强制复位。"""
     turbine_id = _lit(turbine_id, _RE_TURBINE, "风机编号")
@@ -449,8 +498,9 @@ def remote_reset_ban(turbine_id: str, fault_code: str) -> dict[str, Any]:
     checks.append({"款": "4.1(4) 无法确认设备安全状态", "结论": "资料无法确认",
                    "说明": "数据库不记录设备安全状态。按第 1.3 条保守处置原则，不得推定其已确认。"})
 
-    c5 = any(k in manual for k in _BAN_POWER_CIRCUIT)
-    checks.append({"款": "4.1(5) 涉及母线电压或功率回路", "结论": "成立" if c5 else "不成立"})
+    c5, c5_why = _involves_power_circuit(alarms, manual)
+    checks.append({"款": "4.1(5) 涉及母线电压或功率回路",
+                   "结论": "成立" if c5 else "不成立", "依据": c5_why})
     if c5:
         hits.append("涉及母线电压或功率回路")
 

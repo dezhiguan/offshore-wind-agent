@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import statistics
 import sys
 from datetime import datetime
@@ -30,7 +31,14 @@ from agent.tracing import (  # noqa: E402
 from eval.verdict import SUITES, check  # noqa: E402
 from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO, MAX_SINGLE_DOC_RATIO  # noqa: E402
 
-OUT_DIR = ROOT / "eval" / "out"
+# 产物目录。默认 eval/out，可用 EVAL_OUT_DIR 指到别处。
+#
+# 加这个开关是因为两个人同时跑测会互相把产物覆盖掉：一个会话跑 cases，另一个会话跑
+# cases/probes/boundary/pressure 四套，写的是同一批 <id>.json，谁后写谁算数，而文件里
+# 并不记是哪一轮跑的——事后只能靠 mtime 猜，猜错就会拿别人那轮的答案当自己的结论。
+# _history.jsonl 跟着 OUT_DIR 走，隔离跑测也就不会往共享的指标流水账里掺行。
+# 后台页面与默认命令行跑测都不带这个变量，读写的仍是 eval/out。
+OUT_DIR = Path(os.getenv("EVAL_OUT_DIR") or (ROOT / "eval" / "out"))
 EVAL_DIR = ROOT / "eval"
 
 # 产物搭出来的链路用这个前缀作 id，与留存里的整数 id 区分开

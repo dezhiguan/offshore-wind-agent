@@ -8,6 +8,11 @@
 
 每条用例的完整产物落到 eval/out/<id>.json，同时充当离线回放（--replay）的素材，
 现场断网时仍能走完整界面流程。
+
+两个人同时跑测会互相覆盖产物（写的是同一批 <id>.json，文件里不记是哪一轮跑的）。
+跑并发的那一份请指到别处，指标流水账也会跟着隔离：
+
+    EVAL_OUT_DIR=/tmp/my-run python eval/run.py
 """
 from __future__ import annotations
 
@@ -28,7 +33,12 @@ from agent.composer import compose  # noqa: E402
 from agent.loop import run_agent, warm_up  # noqa: E402
 from eval.verdict import check  # noqa: E402
 
-OUT_DIR = ROOT / "eval" / "out"
+# 产物目录由 evalview 统一定义（可用 EVAL_OUT_DIR 覆盖，用于隔离并发跑测）。
+# 不在这里再写一份 ROOT / "eval" / "out"：两处各写一份，覆盖变量只对其中一处生效，
+# 就会出现「跑测写到别处、页面读的还是 eval/out」这种谁都不会去查的错位。
+OUT_DIR = evalview.OUT_DIR
+
+
 def load_cases(name: str = "cases"):
     return yaml.safe_load((ROOT / "eval" / ("%s.yaml" % name)).read_text(encoding="utf-8"))
 

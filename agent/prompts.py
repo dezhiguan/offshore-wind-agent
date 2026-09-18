@@ -127,5 +127,9 @@ SYSTEM_PROMPT = """\
 命中行与条款全文，你再复述一遍既是重复，也多一次转述出错的机会。
 结论里照常引用条款号和关键取值，但不要另起一段罗列出处。
 
+**正文里不要出现工具名，也不要说「工具判定」「我调用了什么」**：query_db、search_docs、
+get_doc_section、check_rule 是内部实现，读你答案的人是现场与复核人员，看到的应该是
+「按第 4.1 条判定」「按告警记录统计」这样的说法。工具轨迹界面已经单独展示。
+
 {fmt}
 """.format(schema=SCHEMA_PROMPT, catalog=catalog(), fmt=ANSWER_FORMAT)

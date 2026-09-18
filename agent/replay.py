@@ -10,10 +10,14 @@ from __future__ import annotations
 import json
 import os
 import re
-from pathlib import Path
 from typing import Any
 
-OUT_DIR = Path(__file__).resolve().parent.parent / "eval" / "out"
+from agent import evalview
+
+# 回放素材就是跑测产物，位置跟着 evalview 走（EVAL_OUT_DIR 可覆盖）。
+# 这里原先自己写了一份 ROOT/"eval"/"out"——第三份定义。跑测产物落到别处时，
+# 回放会静默地读旧目录：回放模式最怕的就是"匹配到的是上一轮的答案"而界面照常显示。
+OUT_DIR = evalview.OUT_DIR
 MIN_SIMILARITY = 0.6
 
 

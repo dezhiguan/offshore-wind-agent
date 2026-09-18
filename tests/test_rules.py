@@ -172,6 +172,34 @@ class TestRemoteResetBan:
         assert row["结论"] == "成立"
         assert "断电" in row["依据"] and "检查" in row["依据"]
 
+    def test_power_circuit_clause_ignores_work_safety_notes(self):
+        """第 4.1(5) 款判的是故障本身涉及母线电压 / 功率回路，不是换件前要放电。
+
+        上一版是整节裸词命中，手册九节里三节命中，命中句全在「故障处理注意事项」：
+        「更换接口板或通讯模块前，应确认……母线电压降至约 20 V」讲的是作业前置条件。
+        三个码当时都已由其他款命中，结论没翻，但答案里明着写出了「命中第 5 款」。
+        """
+        for turbine_id, fault_code in (("T03", "24002"), ("T05", "24005"), ("T08", "24010")):
+            r = check_rule("remote_reset_ban", turbine_id=turbine_id, fault_code=fault_code)
+            row = [c for c in r["facts"]["逐款核对"] if "4.1(5)" in c["款"]][0]
+            assert row["结论"] == "不成立", (turbine_id, fault_code)
+            # 「只在注意事项里提过」和「压根没提」是两回事，判词要能分清
+            assert "故障处理注意事项" in row["依据"]
+            assert "涉及母线电压或功率回路" not in r["verdict"]
+
+    def test_power_circuit_clause_still_bans_via_other_clauses(self):
+        """4.1(5) 不再误命中，但这三个码该禁的照禁——禁令由 4.1(1)(2)(3) 承担。"""
+        for turbine_id, fault_code in (("T03", "24002"), ("T05", "24005"), ("T08", "24010")):
+            r = check_rule("remote_reset_ban", turbine_id=turbine_id, fault_code=fault_code)
+            assert r["reset_banned"] is True, (turbine_id, fault_code)
+
+    def test_power_circuit_clause_says_so_when_manual_silent(self):
+        """手册没提过的（24012），判词不能和「只在注意事项里提过」用同一句话。"""
+        r = check_rule("remote_reset_ban", turbine_id="T07", fault_code="24012")
+        row = [c for c in r["facts"]["逐款核对"] if "4.1(5)" in c["款"]][0]
+        assert row["结论"] == "不成立"
+        assert "未提及" in row["依据"]
+
 
 class TestCloseCompliance:
     def test_t09_eeprom_order_not_compliant(self):

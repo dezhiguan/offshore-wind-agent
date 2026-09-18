@@ -47,6 +47,7 @@ python app.py                 # 或 uvicorn app:app --port 8000
 | `AGENT_MAX_STEPS` | `6` | 工具调用循环上限 |
 | `GROUNDING_MODE` | `shadow` | 接地校验：`off` / `shadow`（只标注）/ `enforce`（写入无法确认项） |
 | `REPLAY_MODE` | `false` | 离线回放，见第五节 |
+| `EVAL_OUT_DIR` | `eval/out` | 跑测产物与指标流水账的落盘位置；并发跑测时指到别处，避免两轮互相覆盖 |
 
 ## 二、方案结构
 

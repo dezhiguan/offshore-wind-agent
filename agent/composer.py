@@ -503,6 +503,34 @@ def enumeration_gap(answer: str, evidence: dict[str, Any]) -> dict[str, Any]:
     return gaps
 
 
+# 内部工具名不该出现在给人看的正文里。提示词已经写了禁止，但实测同一道题两轮跑，
+# 一轮干净、一轮写出「check_rule 判定命中第 4.1 条」「工具判定不构成重复故障」——
+# 措辞类要求靠提示词只能压低频率，压不到零，所以再加一道确定性的收口。
+#
+# 只洗模型自己写的三段（结论 / 无法确认 / 本次未完成）。依据面板与链路追踪要照原样
+# 展示 SQL 和工具名——那是给复核人看执行过程的，洗掉就没法追了。
+_TOOL_LABELS = {
+    "check_rule": "规程判定",
+    "query_db": "数据库查询",
+    "search_docs": "资料检索",
+    "get_doc_section": "资料原文",
+}
+# 顺带吃掉紧跟其后的那个名词，否则「check_rule 判定」会洗成「规程判定 判定」
+_TOOL_MENTION = re.compile(
+    r"`?(check_rule|query_db|search_docs|get_doc_section)`?\s*(?:工具)?\s*"
+    r"(?:判定|结果|查询|检索|返回)?")
+
+
+# 「工具判定不构成重复故障」——不带工具名，但同样是把内部实现说给现场听。
+# 只洗这一个固定搭配：现场语境里「工具」多指扳手、力矩扳手这类实物，不能泛洗。
+_TOOL_VERDICT = re.compile(r"(?:本|该|这个)?工具(?:判定|判断|给出的结论)")
+
+
+def scrub_tool_names(text: str) -> str:
+    text = _TOOL_MENTION.sub(lambda m: _TOOL_LABELS[m.group(1)], text or "")
+    return _TOOL_VERDICT.sub("规程判定", text)
+
+
 def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
     draft = run.get("draft") or ""
     parts = _split_sections(draft)
@@ -569,14 +597,14 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
     basis = render_basis(evidence) or _as_items(parts.get(H_BASIS, ""))
     return {
         "question": question,
-        "answer": answer,
+        "answer": scrub_tool_names(answer),
         "basis": basis,
-        "unverifiable": unverifiable,
+        "unverifiable": [scrub_tool_names(u) for u in unverifiable],
         # 与 unverifiable 分开的第二个面。两者说的都不是「资料里没有」，但成因不同：
         #   incomplete —— 模型自己写下的「该判而未判」，重跑即可消除
         #   truncation —— 代码陈述的机器事实：跑了几步、哪张表整轮没被碰过
         # 界面合成一张卡展示，避免同一件事出现两块提示。
-        "incomplete": incomplete,
+        "incomplete": [scrub_tool_names(i) for i in incomplete],
         "truncation": build_truncation(run, evidence, bool(incomplete)),
         # 把规则判定转成现场核实清单：同一份数据，从「我不知道」变成「你要去办的几件事」
         "checklists": build_checklists(evidence),
