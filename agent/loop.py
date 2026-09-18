@@ -107,12 +107,17 @@ class _Call:
 
 
 def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Trace,
-          *, stream_answer: bool = True):
+          *, stream_answer: bool = True, release_mark: str | None = None):
     """发起一次流式调用。
 
-    `stream_answer=False` 时本轮正文只累计、不逐字吐给界面。用在还没取到任何证据的
-    那几轮上：那时候写出来的东西随时可能被「未取证拦截」整段作废，先吐后撤等于让
-    用户看着一段完整答案被换掉（见 run_agent_stream 里 streamed 的说明）。
+    `stream_answer=False` 时正文先扣住不发。用在还没取到任何证据的那几轮上：
+    那时候写出来的东西随时可能被「未取证拦截」整段作废，先吐后撤等于让用户看着
+    一段完整答案被换掉（见 run_agent_stream 里 streamed 的说明）。
+
+    但「扣住」不能一扣到底——范围外声明是护栏的合规出口，那一轮同样没有工具调用，
+    却是要放行的。所以给一个放行标记 `release_mark`：正文里一出现它，就说明这轮
+    不会被作废，立刻把攒下的补发出去、后面照常逐字流。标记按提示词要求写在
+    「结论」段首句，扣住的时间因此只有一句话，出口路径几乎不损失首字时间。
 
     实测（见 设计说明 第 3.14 节）：一次多步问答里 69% 的耗时花在最后一次「写答案」上——
     1402 个字符按约 94 字符/秒生成，就是 13 秒。决策调用反而很快（2~3 秒）。
@@ -122,9 +127,11 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
     """
     span = trace.start("MODEL", "Agent 决策", detail=model)
     usage = None
-    content_parts: list[str] = []
+    joined = ""           # 本轮已收到的全部内容，滚动累加（逐块重拼是 O(n²)）
     partial: dict[int, dict[str, str]] = {}
-    answering = False
+    answer_at = -1        # 正文（「## 结论」）在已收到内容里的起点，-1 表示还没出现
+    emitted = 0           # 正文里已经吐给界面的字符数，补发时从这里接着发
+    streaming = stream_answer
 
     # 失败（超时、限流、网关 5xx）同样是一次模型调用，要留下 ERROR span：
     # 只记成功的话，后台的模型调用成功率就永远是 100%。
@@ -141,20 +148,20 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
                 continue
             delta = chunk.choices[0].delta
             if delta.content:
-                content_parts.append(delta.content)
+                joined += delta.content
                 # 决策轮也会顺带输出几句自然语言（「我需要先查询…」）。
                 # 那些不是答案，若照发给界面，会出现"冒出几个字又被冲掉"的闪烁。
                 # 以提示词强制的三段标题为界：见到「## 结论」才算进入最终答案。
-                if answering:
-                    if stream_answer:
-                        yield {"type": "token", "text": delta.content}
-                else:
-                    joined = "".join(content_parts)
-                    at = joined.find(ANSWER_MARKER)
-                    if at >= 0:
-                        answering = True
-                        if stream_answer:
-                            yield {"type": "token", "text": joined[at:]}
+                if answer_at < 0:
+                    answer_at = joined.find(ANSWER_MARKER)
+                if answer_at >= 0:
+                    body = joined[answer_at:]
+                    # 见到放行标记就解扣：这一轮已经确定不会被未取证拦截作废
+                    if not streaming and release_mark and release_mark in joined:
+                        streaming = True
+                    if streaming and len(body) > emitted:
+                        yield {"type": "token", "text": body[emitted:]}
+                        emitted = len(body)
             for tc in (delta.tool_calls or []):
                 slot = partial.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
                 if tc.id:
@@ -175,7 +182,7 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
         raise
 
     calls = [_Call(v["id"], v["name"], v["arguments"]) for _, v in sorted(partial.items())]
-    content = "".join(content_parts)
+    content = joined
 
     pt = getattr(usage, "prompt_tokens", 0) or 0
     ct = getattr(usage, "completion_tokens", 0) or 0
@@ -195,14 +202,14 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
         prompt_tokens=pt, completion_tokens=ct, cached_tokens=cached,
         cost_cny=round(price_of(model, pt, ct, cached), 6),
     )
-    if calls and answering:
+    if calls and emitted:
         # 极少见：同一轮里既出现了标题又发起了工具调用。已渲染的不是最终答案，要撤掉。
-        # 没往界面吐过字就没什么可撤的，别发空指令让前端白闪一下。
-        if stream_answer:
-            yield {"type": "answer_reset"}
-    elif not calls and not answering and content.strip():
-        # 模型没按三段格式输出时的兜底：一次性给出，不让界面空着
-        if stream_answer:
+        # 一个字都没吐过就没什么可撤的，别发空指令让前端白闪一下。
+        yield {"type": "answer_reset"}
+    elif not calls and answer_at < 0 and content.strip():
+        # 模型没按三段格式输出时的兜底：一次性给出，不让界面空着。
+        # 同样只在这一轮不会被作废时才发——扣住期间宁可晚一点，也不能吐了再撤。
+        if streaming or (release_mark and release_mark in content):
             yield {"type": "token", "text": content}
     yield {"type": "_message", "message": _Msg(content, calls)}
 
@@ -407,8 +414,10 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
         for _step in range(MAX_STEPS):
             msg = None
             # 一条证据都还没取到时，这一轮写出来的正文随时可能被下面的未取证拦截
-            # 整段作废，所以只累计不外发。取到证据之后拦截不会再触发，正文照常逐字流。
-            for event in _call(client, model, messages, tr, stream_answer=bool(trace)):
+            # 整段作废，所以先扣住。取到证据之后拦截不会再触发，正文照常逐字流；
+            # 范围外声明那条合规出口靠 release_mark 当场解扣，不必等整轮跑完。
+            for event in _call(client, model, messages, tr, stream_answer=bool(trace),
+                               release_mark=OUT_OF_SCOPE_MARK):
                 if event["type"] == "_message":
                     msg = event["message"]
                     continue
