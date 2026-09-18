@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>海上风电机组维检 Agent · 原型设计文档</title>
+<style>
+:root{
+  --ink:#16191d; --muted:#5d6672; --line:#e3e7ec; --line2:#f1f3f6;
+  --bg:#ffffff; --surface:#f8fafc; --accent:#1f5fa9;
+  --ok:#1a7f4b; --warn:#a8630b; --bad:#b3261e; --r:8px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.75 -apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:960px;margin:0 auto;padding:44px 28px 90px}
+h1{font-size:27px;line-height:1.35;margin:0 0 6px;letter-spacing:.2px}
+h2{font-size:20px;margin:46px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+h3{font-size:16px;margin:26px 0 8px}
+h4{font-size:14.5px;margin:18px 0 6px;color:var(--muted);font-weight:600}
+p{margin:9px 0}
+.sub{color:var(--muted);margin:0 0 20px;font-size:14px}
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
+th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--surface);font-weight:600;white-space:nowrap}
+td code,p code,li code{background:var(--surface);border:1px solid var(--line2);
+  border-radius:4px;padding:1px 5px;font-size:12.5px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+pre.wire{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  padding:14px 16px;overflow:auto;font-size:12.5px;line-height:1.6;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre}
+ul,ol{margin:9px 0;padding-left:1.4em}
+li{margin:4px 0}
+.meta{border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin:18px 0 8px}
+.meta table{margin:0;border:0}
+.meta th,.meta td{border:0;border-bottom:1px solid var(--line2)}
+.meta th{width:96px;background:var(--surface)}
+.toc{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  padding:14px 18px;margin:22px 0 0;font-size:13.5px;columns:2;column-gap:32px}
+.toc a{color:var(--accent);text-decoration:none}
+.toc div{break-inside:avoid;margin:3px 0}
+.note{border-left:3px solid var(--accent);background:var(--surface);
+  border-radius:0 var(--r) var(--r) 0;padding:10px 14px;margin:14px 0;font-size:13.5px}
+.note.warn{border-left-color:var(--warn)}
+.note b{color:var(--ink)}
+.tag{display:inline-block;font-size:11.5px;line-height:1.6;padding:1px 7px;border-radius:999px;
+  border:1px solid var(--line);background:var(--surface);color:var(--muted);white-space:nowrap}
+.tag.ok{color:var(--ok);border-color:#bfe3cd;background:#f2fbf6}
+.tag.bad{color:var(--bad);border-color:#f0cdcb;background:#fdf4f3}
+.tag.pd{color:var(--warn);border-color:#f0dcbb;background:#fdf8ef}
+footer{margin-top:60px;padding-top:16px;border-top:1px solid var(--line);
+  color:var(--muted);font-size:12.5px}
+@media (prefers-color-scheme:dark){
+  :root{--ink:#e6e9ee;--muted:#98a2b0;--line:#2b3138;--line2:#23282e;
+    --bg:#14171a;--surface:#1b1f24;--accent:#6aa8e8;--ok:#5fc08c;--warn:#e0a85c;--bad:#e88b84}
+}
+@media print{.toc{display:none}body{font-size:12px}.wrap{padding:0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>海上风电机组维检 Agent · 原型设计文档</h1>
+<p class="sub">界面结构、交互规则与页面级验收要点</p>
+
+<div class="meta">
+<table>
+<tr><th>文档版本</th><td>V1.0</td></tr>
+<tr><th>拟制日期</th><td>2026-09-18</td></tr>
+<tr><th>适用范围</th><td>问答页（<code>/</code>）、管理后台（<code>/admin</code>，含 Agent 质量中心与链路追踪）</td></tr>
+<tr><th>对应实现</th><td><code>static/index.html</code>、<code>static/admin.html</code>（分支 <code>main</code>，提交 <code>4a4e310</code>）</td></tr>
+<tr><th>关联文档</th><td>《架构设计文档》《验收标准文档》《设计说明》</td></tr>
+</table>
+</div>
+
+<h4>修订记录</h4>
+<table>
+<tr><th>版本</th><th>日期</th><th>修订内容</th><th>拟制</th></tr>
+<tr><td>V1.0</td><td>2026-09-18</td><td>依据已实现界面补齐原型设计：三视图线框、分区契约、状态机、组件规格、文案与口径规范</td><td>架构组</td></tr>
+</table>
+
+<div class="toc">
+<div><a href="#s1">一、设计目标与使用角色</a></div>
+<div><a href="#s2">二、页面清单与信息架构</a></div>
+<div><a href="#s3">三、全局设计规范</a></div>
+<div><a href="#s4">四、问答页原型</a></div>
+<div><a href="#s5">五、Agent 质量中心原型</a></div>
+<div><a href="#s6">六、链路追踪原型</a></div>
+<div><a href="#s7">七、组件规格</a></div>
+<div><a href="#s8">八、关键交互时序</a></div>
+<div><a href="#s9">九、可访问性、响应式与打印</a></div>
+<div><a href="#s10">十、原型与实现对应关系</a></div>
+<div><a href="#s11">十一、本期未纳入的原型项</a></div>
+<div><a href="#s12">十二、页面级验收要点</a></div>
+</div>
+
+<h2 id="s1">一、设计目标与使用角色</h2>
+
+<p>系统回答的是风机运行与检修合规问题，结论会影响现场作业决策。界面的第一目标不是"答得好看"，
+而是<b>让人能判断这个结论该不该采信</b>。三条设计主张贯穿全部页面：</p>
+
+<ol>
+<li><b>结论与依据同屏可达</b>：任何一句结论，都能在同一页内展开到它所依据的 SQL、命中行或条款原文。</li>
+<li><b>边界前置</b>：系统答不了什么，在用户提问<em>之前</em>就写在页面上，而不是问完才说"无法确认"。</li>
+<li><b>口径随指标出现</b>：凡是给出数字的地方，同屏标注它的统计口径与样本量；不给没有口径的分数。</li>
+</ol>
+
+<table>
+<tr><th>角色</th><th>主要诉求</th><th>入口</th></tr>
+<tr><td>现场与值班人员</td><td>问清楚某台风机的状态、告警、工单安排与作业是否合规，并知道还要现场核实什么</td><td>问答页 <code>/</code></td></tr>
+<tr><td>技术复核人员</td><td>逐段复核 Agent 的决策过程：调了哪些工具、取回了什么、护栏是否触发</td><td>后台 → 链路追踪</td></tr>
+<tr><td>质量与运维负责人</td><td>看回归用例是否全过、线上真实流量是否被接住、代价与上下文水位</td><td>后台 → Agent 质量中心</td></tr>
+</table>
+
+<h2 id="s2">二、页面清单与信息架构</h2>
+
+<table>
+<tr><th>#</th><th>页面 / 视图</th><th>路由</th><th>职责</th><th>数据来源</th></tr>
+<tr><td>P1</td><td>问答页</td><td><code>GET /</code></td><td>提问、实时查询过程、回答、核实清单、依据</td><td><code>POST /ask/stream</code>（SSE）</td></tr>
+<tr><td>P2</td><td>后台 · Agent 质量中心 · 离线评测</td><td><code>GET /admin</code>（默认视图）</td><td>固定用例的通过情况与四类指标块，可现场执行</td><td><code>GET /api/eval</code>、<code>POST /api/eval/run</code></td></tr>
+<tr><td>P3</td><td>后台 · Agent 质量中心 · 线上质量</td><td><code>GET /admin</code>（分段控件切换）</td><td>真实流量的收口情况、拒答与标注、代价与红线水位</td><td><code>GET /api/quality/online</code></td></tr>
+<tr><td>P4</td><td>后台 · 链路追踪</td><td><code>GET /admin</code>（左栏切换）</td><td>按 span 逐段复核单次问答</td><td><code>GET /api/traces</code>、<code>/api/traces/{id}</code></td></tr>
+</table>
+
+<pre class="wire">
+信息架构
+
+ ┌ 问答页 /  ────────────────────────────────────────────── 面向使用者
+ │   能力说明（可以回答 / 无法回答）
+ │   提问框 + 示例问句
+ │   执行时间线（流式）→ 回答 → 核实清单 → 未完成 / 待核实 → 数据源 → 依据
+ │
+ └ 管理后台 /admin ───────────────────────────────────────── 面向复核与运维
+     ├ Agent 质量中心
+     │    ├ 离线评测   固定用例 + 断言，判得出对错
+     │    └ 线上质量   真实问答的痕迹，没有标准答案
+     └ 链路追踪        最近 50 条链路的 span 明细（诊断，不出聚合指标）
+</pre>
+
+<div class="note"><b>页面边界是刻意的。</b>链路追踪页不出任何聚合指标：同一个"工具调用成功率"，
+在链路页（最近 50 条、线上与回归混算、重启归零）与质量中心（固定用例集 / 真实流量分档）
+必然给出不同数值，两处并存只会让人以为系统在自相矛盾。聚合口径统一归质量中心，
+链路页只负责"从一堆链路里挑出该点开的那一条"。</div>
+
+<h2 id="s3">三、全局设计规范</h2>
+
+<h3>3.1 版式</h3>
+<table>
+<tr><th>项</th><th>问答页</th><th>后台</th></tr>
+<tr><td>栅格</td><td>单列，内容区最大宽 880px，居中</td><td>左栏导航 200px + 内容区自适应；链路追踪为列表 / 详情双栏</td></tr>
+<tr><td>正文字号</td><td>15px / 行高 1.75</td><td>13.5px / 行高 1.7（信息密度优先）</td></tr>
+<tr><td>卡片</td><td>1px 描边 + 8px 圆角，不使用投影</td><td>同左；指标块统一为「标题 + 口径副标题 + 指标网格」</td></tr>
+<tr><td>折叠</td><td>原始依据默认折叠（<code>&lt;details&gt;</code>）</td><td>span 输入输出参数默认折叠</td></tr>
+</table>
+
+<h3>3.2 状态色语义</h3>
+<p>全站只有一套状态语义，问答页的核实清单与后台的 span 状态共用同一组含义：</p>
+<table>
+<tr><th>语义</th><th>标记</th><th>问答页含义</th><th>后台含义</th></tr>
+<tr><td><span class="tag ok">已确认 / OK</span></td><td>实心 ✓</td><td>资料明确支持该项</td><td>该段按预期完成</td></tr>
+<tr><td><span class="tag bad">明确不满足 / ERROR</span></td><td>实心 ✕</td><td>资料明确不支持（如备件不可用）</td><td>该段失败（模型超时、工具报错）</td></tr>
+<tr><td><span class="tag pd">待现场核实 / DEGRADED</span></td><td>空心</td><td>资料没有记录，需现场确认并留痕</td><td>按预期收紧：预算拦截、未取证打回</td></tr>
+</table>
+<div class="note warn"><b>"明确不满足"与"待现场核实"永远分开显示。</b>前者是已知的坏消息，
+后者是系统的边界。合并成一类，用户就分不清哪些已成定论、哪些还要去查——在电力安全场景里
+这不是措辞问题。</div>
+
+<h3>3.3 文案规范</h3>
+<ul>
+<li>不用绝对化表述替代判定结论；结论句必须能追到依据区的某一条证据。</li>
+<li><b>"本轮未查完"与"待现场核实"分属两张卡</b>：前者重跑一次即可消除，后者派人上岛也未必消得掉。
+混在一起，读者会把残缺结论当成完整结论。</li>
+<li>指标一律"值 + 口径 + 样本量"三件套同屏，例如「P95 28.2s · P50 11.0s · 样本 53」。</li>
+<li>涨跌单位分两类且不混用：比率类用百分点 <code>pp</code>，量纲类（耗时、Token、成本）用相对百分比 <code>%</code>；
+颜色按<b>好坏</b>给而非按方向给（耗时涨是红、准确率涨是绿）；幅度小于 0.05pp / 0.5% 显示「持平」。</li>
+</ul>
+
+<h2 id="s4">四、问答页原型</h2>
+
+<h3>4.1 线框</h3>
+<pre class="wire">
+┌───────────────────────────────────────────────────────────────────────┐
+│  海上风电机组维检 Agent                                                │
+│  自然语言询问风机状态、告警、工单安排、故障处理办法与作业合规性         │
+├───────────────────────────────────────────────────────────────────────┤
+│  ① 本系统能做什么                                                      │
+│  ┌──────────────────────────┬──────────────────────────────────────┐  │
+│  │ 可以回答                  │ 无法回答                              │  │
+│  │ · 型号 / 状态 / 最近告警  │ · 现场安全条件（母线电压、挂牌上锁…）│  │
+│  │ · 指定时段告警记录        │ · 责任归属与调查结论                  │  │
+│  │ · 故障原理与排查步骤      │ · 备件实物库存与到货时间              │  │
+│  │ · 工单优先级 / 备件 / 观察│ · 海况、天气与人员资质                │  │
+│  │ · 重复故障 / 复位 / 关单  │ 以上均无记录，系统标注「需现场核实」  │  │
+│  └──────────────────────────┴──────────────────────────────────────┘  │
+│  ② 示例问句（点击填入）  [ 型号状态 ] [ 时段告警 ] [ 关单合规 ] …      │
+├───────────────────────────────────────────────────────────────────────┤
+│  ③ [ 提问输入框 ………………………………………………………… ]  ( 提问 )  │
+│     时间范围一律按闭区间理解；数据覆盖 2026-07-01 ~ 2026-07-20        │
+├───────────────────────────────────────────────────────────────────────┤
+│  ④ 查询过程                                       已用时 12.4s        │
+│     1 ✓ query_db        T05 工单双键关联 · 1 行                       │
+│     2 ✓ search_docs     第 6.1 条 关单必备记录                        │
+│     3 ✓ check_rule      close_compliance · 第 6.1/6.4 条              │
+│     ▌正在整理结论与依据…                                              │
+├───────────────────────────────────────────────────────────────────────┤
+│  ⑤ 回答                                （流式逐字浮现，带光标）        │
+├───────────────────────────────────────────────────────────────────────┤
+│  ⑥ 现场核实清单  第 5.1 条 · T08                                      │
+│     3 项已确认   1 项明确不满足   5 项待现场核实   共 9 项            │
+│     ✓ 机组已停机（告警记录 STOPPED）                                  │
+│     ✕ 备件不可用（part_available = 0）                                │
+│     ○ 挂牌上锁 / 验电 / 母线电压 …                                    │
+│     空心项数据库没有记录，需现场逐项确认并留痕。系统只读，不代为确认。│
+├───────────────────────────────────────────────────────────────────────┤
+│  ⑦ 本轮未完成查询（如有）   ← 与⑧严格分开                             │
+│  ⑧ 其他需现场核实的事项                                               │
+├───────────────────────────────────────────────────────────────────────┤
+│  ⑨ 使用的数据源   [运行告警记录] [维检工单] [检修作业与安全管理规程]  │
+│  ⑩ 结论依据       · 代码从真实工具调用汇总，非模型转述                │
+│  ⑪ 原始依据       ▸ 数据表 · 查询1 · 命中 1 行（展开见 SQL 与行）     │
+│                   ▸ 规程判定 · close_compliance · 第 6.1、6.4 条      │
+│                   ▸ 章节原文 · 第 6.1 条（全文）                       │
+│  ⑫ 查询过程（完成态轨迹，逐步可读）                                   │
+└───────────────────────────────────────────────────────────────────────┘
+</pre>
+
+<h3>4.2 分区契约</h3>
+<p>每个区块由回答契约中的一个字段驱动，字段为空时该区块整体不渲染——不出现空卡片。</p>
+<table>
+<tr><th>#</th><th>区块</th><th>驱动字段</th><th>渲染规则</th></tr>
+<tr><td>①</td><td>能力说明</td><td>静态</td><td>常驻页首，两列对照；右列末尾固定声明"无记录即标注需现场核实，不推测"</td></tr>
+<tr><td>②</td><td>示例问句</td><td>静态</td><td>点击填入输入框，不自动提交，保留用户改写机会</td></tr>
+<tr><td>③</td><td>提问区</td><td>—</td><td>最长 500 字；提交中禁用按钮；下方常驻闭区间与数据覆盖范围说明</td></tr>
+<tr><td>④</td><td>执行时间线</td><td>SSE <code>step</code> / <code>thinking</code></td><td>每完成一次工具调用追加一行，显示已用时；被护栏拒绝的调用标注为"已拒绝"并给出原因</td></tr>
+<tr><td>⑤</td><td>回答</td><td><code>answer</code></td><td>见到 <code>## 结论</code> 标题才开始渲染（决策轮的自然语言不推送）；支持 <code>answer_reset</code> 撤销</td></tr>
+<tr><td>⑥</td><td>现场核实清单</td><td><code>checklists[]</code></td><td>仅当本次实际调用过对应规则时生成；三态计数置顶；有 pending 项时显示底部声明</td></tr>
+<tr><td>⑦</td><td>本轮未完成查询</td><td><code>truncation</code> / <code>incomplete[]</code></td><td>合成一张卡：机器事实（已执行几步、哪类资料整轮未读）+ 模型自陈的该判未判项</td></tr>
+<tr><td>⑧</td><td>其他需现场核实</td><td><code>unverifiable[]</code></td><td>清单未覆盖的自由文本边界项</td></tr>
+<tr><td>⑨</td><td>使用的数据源</td><td><code>sources[]</code></td><td>由代码从真实工具调用反推，含规则引擎旁路命中的条款来源</td></tr>
+<tr><td>⑩</td><td>结论依据</td><td><code>basis[]</code></td><td>由代码从证据渲染，不由模型复述</td></tr>
+<tr><td>⑪</td><td>原始依据</td><td><code>evidence.{tables,rules,docs}</code></td><td>默认折叠；展开见原始 SQL、命中行表格、规则判定事实、章节全文</td></tr>
+<tr><td>⑫</td><td>查询过程</td><td><code>trace[]</code></td><td>完成态的完整轨迹，与④的流式行合并为最终形态</td></tr>
+</table>
+
+<h3>4.3 页面状态机</h3>
+<pre class="wire">
+ 空闲 ──提交──► 思考中（"正在判断需要查询哪些资料…"）
+                   │
+                   ├──step──► 查询中（时间线逐行追加 + 已用时计时）
+                   │             │
+                   │             ├──token──► 答案流式浮现（光标闪烁）
+                   │             │              │
+                   │             │       answer_reset（同轮又发起工具调用）
+                   │             │              └──► 撤销已渲染正文，回到查询中
+                   │             └──composing──► "正在整理结论与依据…"
+                   │
+                   └──error──► 失败态（四类文案，见下）
+ done ──► 完成态（回答 + 清单 + 依据 + 完整轨迹）
+</pre>
+<table>
+<tr><th>失败类型</th><th>触发</th><th>页面表现</th></tr>
+<tr><td>证据不足拒答</td><td>两次未调用任何工具</td><td>正文明确写明"本系统要求所有结论必须有随题资料支撑"，不是白屏；后台计入"未取证拒答率"，不计入任务完成</td></tr>
+<tr><td>检索为空</td><td>召回无命中</td><td>如实说明资料中没有该条目，不得套用相近条目</td></tr>
+<tr><td>SQL 出错</td><td>语句被守卫拒绝或执行报错</td><td>错误回灌模型重写一次；仍失败则在时间线上标红该步</td></tr>
+<tr><td>模型超时 / 网关异常</td><td><code>llm_error</code></td><td>给出明确提示而非白屏；该次失败链路仍进留存，使后台成功率有分母</td></tr>
+<tr><td>离线回放未匹配</td><td><code>replay_miss</code></td><td>提示改用示例问题或关闭回放模式</td></tr>
+</table>
+<p>回放模式下页首固定出现一条提示：标明当前为离线回放、匹配到的用例编号与原问题。</p>
+
+<h2 id="s5">五、Agent 质量中心原型</h2>
+
+<h3>5.1 线框</h3>
+<pre class="wire">
+┌──────────────┬────────────────────────────────────────────────────────┐
+│ 海上风电维检  │  Agent 质量中心                    ( 运行全部 )( 运行选中 )│
+│   管理后台    │  ───────────────────────────────────────────────────── │
+│              │  [ 离线评测 ]  [ 线上质量 ]      ← 分段控件，口径不同   │
+│ ▸ Agent质量中心│  固定用例+断言   真实问答的痕迹                        │
+│   离线·线上   │                                                        │
+│ ▸ 链路追踪    │  ┌ 质量门禁  断言全部命中才算通过 · 离线口径 ────────┐ │
+│   span 明细   │  │ 结果准确率 100%  任务完成率 100%                  │ │
+│              │  │ 回归 ■■■■■■■■■■■ 11/11  探针 ■■■■■■■■■■ 10/10   │ │
+│              │  │ 施压 ■■■■■■■■■ 9/9      边界 ■■…■ 23/23         │ │
+│              │  └──────────────────────────────────────────────────┘ │
+│              │  ┌ 执行健康  过程是否按预期收口 ─────────────────────┐ │
+│              │  │ 工具调用成功率 99.3%（151 次 · 1 次失败）         │ │
+│              │  │ 链路完成率 98.1%（其中 5 条链路内有降级）         │ │
+│              │  └──────────────────────────────────────────────────┘ │
+│              │  ┌ 代价  延迟与成本 ────────────────────────────────┐ │
+│              │  │ P95 28.2s（P50 11.0s · 样本 53）                  │ │
+│              │  │ 1步 18条 P50 6.0s ｜ 2-3步 18条 11.1s ｜ 4步+ 19.9s│ │
+│              │  │ 平均 Token 15311（缓存命中均值 12066）            │ │
+│              │  │ 单任务成本 ¥0.0048（合计 ¥0.2546 · 53 条）        │ │
+│              │  └──────────────────────────────────────────────────┘ │
+│              │  ┌ 上下文红线  去重口径 · 峰值 ─────────────────────┐ │
+│              │  │ 数据行 24.2% / 50%   文档字符 34.1% / 70%         │ │
+│              │  │ 单份文档 43.1% / 60%                              │ │
+│              │  └──────────────────────────────────────────────────┘ │
+│              │  ┌ 用例  点击任意一行到链路追踪逐段复核 ────────────┐ │
+│              │  │ ☐ S1 T01 型号与最新状态   PASS  5.9s  1 步  …    │ │
+│              │  │ ☐ Q5 T03 重复故障判定     PASS 27.4s 12 步  …    │ │
+│              │  └──────────────────────────────────────────────────┘ │
+└──────────────┴────────────────────────────────────────────────────────┘
+</pre>
+
+<h3>5.2 两档口径（页面必须显性说明）</h3>
+<table>
+<tr><th></th><th>离线评测</th><th>线上质量</th></tr>
+<tr><td>样本</td><td><code>eval/</code> 下的固定用例（回归 / 探针 / 施压 / 边界）</td><td>用户在问答页真实提出的问题</td></tr>
+<tr><td>有无标准答案</td><td>有断言，判得出对错</td><td>没有，判不了对错</td></tr>
+<tr><td>结论指标</td><td>结果准确率</td><td>服务达成（正常收口占比）</td></tr>
+<tr><td>数据来源</td><td><code>eval/run.py</code> 的落盘产物（只读渲染）</td><td>进程内链路留存（<code>source=online</code>）</td></tr>
+</table>
+<div class="note"><b>两档的分母互不相交</b>：后台点「运行全部」跑出来的链路标为 <code>source=eval</code>，
+一条都不进线上质量。挑好的用例混进线上指标会把成功率抬着走，
+而线上质量要回答的恰恰是"真实用户问出来的东西，系统接得住吗"。
+页面也不把两档合成"综合质量分"——分数变动时没人说得清是用例挂了还是线上降级了。</div>
+
+<h3>5.3 线上质量的指标块</h3>
+<p>这一档<b>一个"准确率"都不出现</b>，出现的全是系统自己留下的痕迹：</p>
+<table>
+<tr><th>指标块</th><th>内容</th><th>口径</th></tr>
+<tr><td>服务达成</td><td>正常收口占比；降级与失败分开数</td><td>降级 = 给了回答但没走主路径；失败 = 没有回答</td></tr>
+<tr><td>回答可用性</td><td>有效回答率、未取证拒答率、标注存疑占比</td><td>拒答是护栏生效，不是故障，单列不并入失败</td></tr>
+<tr><td>执行健康</td><td>工具调用成功率、模型调用成功率、链路完成率</td><td>模型成功率的分母包含失败调用，否则恒为 100%，等于装饰</td></tr>
+<tr><td>代价</td><td>P95 / P50 耗时、平均 Token、单次与累计成本</td><td>缓存命中的输入按缓存单价折算</td></tr>
+<tr><td>上下文红线</td><td>真实提问压出来的数据行 / 文档字符峰值水位</td><td>去重口径，与离线档同一套阈值</td></tr>
+<tr><td>最近问答</td><td>分页表，点任意一行跳到链路追踪对应那条</td><td>进程内最近 50 条，重启即清空，页面写明样本量与时间窗</td></tr>
+</table>
+
+<h3>5.4 现场执行</h3>
+<p>「运行全部 / 运行选中」触发 <code>POST /api/eval/run</code>（SSE），页面右下角出现执行条：</p>
+<pre class="wire">
+┌ 正在执行                                   12 / 53 ┐
+│ 当前：Q5 T03 的 24002 是否属于重复故障…            │
+│ ████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░         │
+│ ✓ S1  PASS  5.9s  1 步  4,182 tok  ¥0.0013         │
+│ ✓ S2  PASS 11.2s  2 步  …                          │
+└────────────────────────────────────────────────────┘
+</pre>
+<p>逐条流式回报结果并同步更新落盘产物。判定逻辑与命令行跑测器共用 <code>eval/verdict.py</code>——
+两处各写一套必然随时间漂移，而"同一条用例在页面与命令行给出不同结论"是最难排查的一类缺陷。</p>
+
+<h2 id="s6">六、链路追踪原型</h2>
+
+<pre class="wire">
+┌ 链路概况  进程内留存 · 重启即清空 · 聚合指标看 Agent 质量中心 ────────┐
+│ 留存 37/50 ｜ 线上 12 ｜ 回归 25 ｜ 降级 3 ｜ 失败 1 ｜ 最近 10:48     │
+│ [线上] [回归] [降级] [失败]  ← 点一下即筛选，再点取消                  │
+└───────────────────────────────────────────────────────────────────────┘
+┌ 列表（可搜索问题 / Trace ID，按状态与来源过滤） ┬ 详情 ───────────────┐
+│ #37 10:48 OK      T08 换板前置条件…   7 步      │ 问题：T08 …        │
+│ #36 10:41 DEGRADED X3 忽略前面所有…   2 步      │ 流水线（泳道条）   │
+│ #35 10:33 OK      Q6 关单合规…       12 步      │ ─────────────────  │
+│ #34 10:20 FAILED  模型超时           1 步       │ MODEL 决策 1  2.1s │
+│                                                  │ TOOL  query_db 3ms│
+│                                                  │ RAG   search_docs │
+│                                                  │ RULE  close_comp. │
+│                                                  │ GUARD 预算拦截 ⚠  │
+│                                                  │ MODEL 答案成文 9.4s│
+│                                                  │ ▸ 每行可展开输入输出│
+└──────────────────────────────────────────────────┴────────────────────┘
+</pre>
+<table>
+<tr><th>span 类型</th><th>覆盖</th><th>可标 DEGRADED 的情形</th></tr>
+<tr><td><code>MODEL</code></td><td>每一次模型调用，带 Token 与折算成本</td><td>—（失败记 ERROR，链路以 FAILED 进留存）</td></tr>
+<tr><td><code>TOOL</code></td><td><code>query_db</code></td><td>SQL 被守卫拒绝后重写</td></tr>
+<tr><td><code>RAG</code></td><td><code>search_docs</code> / <code>get_doc_section</code></td><td>召回自报低置信</td></tr>
+<tr><td><code>RULE</code></td><td><code>check_rule</code> 六条规程判定</td><td>参数缺失导致部分项无法判定</td></tr>
+<tr><td><code>GUARD</code></td><td>上下文预算、未取证打回、接地校验</td><td>预算拦截、打回重取证——按预期收紧，不是错误，但必须留痕</td></tr>
+</table>
+<p>顶部只给导航条，不给聚合指标；来源与异常可直接点选筛选。留存容量 50 条、不落库，页面上明写。</p>
+
+<h2 id="s7">七、组件规格</h2>
+
+<h3>7.1 现场核实清单卡</h3>
+<table>
+<tr><th>元素</th><th>规格</th></tr>
+<tr><td>标题</td><td>清单名 + 条款号 + 主体（如「更换前置条件 · 第 5.1 条 · T08」）</td></tr>
+<tr><td>计数条</td><td>「n 项已确认 / n 项明确不满足 / n 项待现场核实 / 共 n 项」，后两项为 0 时不显示</td></tr>
+<tr><td>条目</td><td>三态标记 + 条目名 + 依据注记（如 <code>part_available = 0</code>）</td></tr>
+<tr><td>底部声明</td><td>仅当存在 pending 项时出现：系统只读、不能代为确认、不据此推定其已满足（第 5.2 条）</td></tr>
+<tr><td>生成条件</td><td>本次实际调用过对应规则才生成，不凭空构造</td></tr>
+</table>
+
+<h3>7.2 指标卡</h3>
+<p>固定三行结构：<b>指标名 + 口径徽标</b> / <b>数值</b> / <b>注脚（样本量、构成、与上一轮涨跌）</b>。
+口径徽标取自实现中的固定词表：<code>ASSERTION</code>、<code>ANSWERED</code>、<code>BY CALL</code>、
+<code>NO CUTOFF</code>、<code>NON-EMPTY</code>、<code>REFUSED</code>、<code>FLAGGED</code>。
+上一轮与本轮用例数不同时不做对比，页面直接说明用例集有变动。</p>
+
+<h3>7.3 证据折叠项</h3>
+<table>
+<tr><th>类型</th><th>摘要行</th><th>展开内容</th></tr>
+<tr><td>数据表</td><td>数据表 · 查询 n · 命中 m 行</td><td>原始 SQL（等宽）+ 命中行表格（横向可滚动）</td></tr>
+<tr><td>规程判定</td><td>规程判定 · 规则名 · 第 x.x 条</td><td>判定结论、逐项事实、引用条款原文</td></tr>
+<tr><td>章节原文</td><td>章节 · 标题</td><td>该节全文</td></tr>
+</table>
+
+<h2 id="s8">八、关键交互时序</h2>
+<pre class="wire">
+用户          问答页             /ask/stream            编排层          界面反馈
+ │ 输入问题      │                     │                   │
+ ├─提交─────────►│                     │                   │
+ │              ├──POST（SSE 建连）──►│                   │
+ │              │                     ├─thinking─────────►│ "正在判断需要查询哪些资料…"
+ │              │                     ├─step（工具1）────►│ 时间线 +1 行，计时开始
+ │              │                     ├─step（工具2）────►│ 时间线 +1 行
+ │              │                     ├─token…───────────►│ 答案逐字浮现
+ │              │                     ├─answer_reset*────►│ 撤销正文（同轮又调工具）
+ │              │                     ├─composing────────►│ "正在整理结论与依据…"
+ │              │                     └─done─────────────►│ 完成态：回答/清单/依据/轨迹
+ │◄─可展开任一条依据核对────────────────────────────────────┤
+</pre>
+<p><b>为什么要有 <code>answer_reset</code></b>：决策轮也会输出自然语言（"我需要先查询告警记录"）。
+若把所有内容增量都当答案推送，界面会出现"冒出几个字又被下一次工具调用冲掉"的反复闪烁。
+因此以三段标题为界，见到 <code>## 结论</code> 才认定进入最终答案；同一轮里既出现标题又发起工具调用时，
+发 <code>answer_reset</code> 撤销已渲染内容；模型完全未按格式输出时，在该轮结束一次性补发。</p>
+
+<h2 id="s9">九、可访问性、响应式与打印</h2>
+<ul>
+<li>键盘可达：提问框 <code>Enter</code> 提交、<code>Shift+Enter</code> 换行；折叠项与筛选 chip 均为原生可聚焦元素，统一 <code>:focus-visible</code> 描边。</li>
+<li>状态不只靠颜色：三态同时有符号（✓ / ✕ / 空心）与文字标签，色觉障碍下仍可分辨。</li>
+<li>动效遵循 <code>prefers-reduced-motion</code>：开启后关闭光标闪烁与进度过渡。</li>
+<li>响应式：问答页单列自适应；后台在窄屏下左栏收起为顶部横向导航，链路详情由双栏降级为上下堆叠。</li>
+<li>宽内容（命中行表格、SQL、span 参数）在各自容器内横向滚动，页面主体不产生横向滚动条。</li>
+<li>页面响应头 <code>Cache-Control: no-store</code>，避免改版后取到旧界面。</li>
+</ul>
+
+<h2 id="s10">十、原型与实现对应关系</h2>
+<table>
+<tr><th>原型区块</th><th>实现位置</th><th>数据契约字段</th></tr>
+<tr><td>问答页全部区块</td><td><code>static/index.html</code></td><td><code>answer / basis / unverifiable / incomplete / truncation / checklists / sources / evidence / trace / meta</code></td></tr>
+<tr><td>核实清单构造</td><td><code>agent/checklist.py</code></td><td><code>checklists[].items[].state ∈ {ok, blocked, pending}</code></td></tr>
+<tr><td>三段解析与证据汇总</td><td><code>agent/composer.py</code></td><td>解析失败降级为原文显示并标注已降级</td></tr>
+<tr><td>后台三视图</td><td><code>static/admin.html</code></td><td><code>/api/eval</code>、<code>/api/quality/online</code>、<code>/api/traces</code></td></tr>
+<tr><td>指标与口径计算</td><td><code>agent/evalview.py</code>、<code>agent/tracing.py</code></td><td>P95 统一实现，离线与线上不各写一份</td></tr>
+<tr><td>流式事件</td><td><code>agent/loop.py</code> → <code>app.py:/ask/stream</code></td><td><code>thinking / step / token / answer_reset / composing / done / error</code></td></tr>
+</table>
+
+<h2 id="s11">十一、本期未纳入的原型项</h2>
+<ol>
+<li>多轮追问与上下文澄清（当前为单轮问答，界面不保留会话线）。</li>
+<li>登录、角色与权限视图：当前形态为单机单用户，后台无鉴权入口。</li>
+<li>链路与线上质量的持久化视图（当前为进程内最近 50 条，重启即清空，页面已写明）。</li>
+<li>移动端专用版式：现有响应式可用，但未做触屏专项交互。</li>
+</ol>
+
+<h2 id="s12">十二、页面级验收要点</h2>
+<p>详细判据见《验收标准文档》，此处列页面侧必查项：</p>
+<ol>
+<li>回答区的任一结论，均可在同页展开到其依据（SQL / 条款原文 / 规则判定事实）。</li>
+<li>核实清单的三态不得合并显示；存在 pending 项时底部声明必须出现。</li>
+<li>"本轮未完成查询"与"需现场核实"分属两张卡，文案不得互串。</li>
+<li>后台每一处数字均有口径标注与样本量；离线与线上不得出现在同一张表内。</li>
+<li>链路追踪页不得出现任何聚合指标；顶部导航条的筛选可点、可取消。</li>
+<li>四类失败与回放未匹配各有独立文案，均不出现白屏。</li>
+</ol>
+
+<footer>
+海上风电机组维检 Agent · 原型设计文档 V1.0 · 2026-09-18 · 与《架构设计文档》《验收标准文档》配套使用
+</footer>
+
+</div>
+</body>
+</html>

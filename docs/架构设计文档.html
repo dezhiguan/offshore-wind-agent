@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>海上风电机组维检 Agent · 架构设计文档</title>
+<style>
+:root{
+  --ink:#16191d; --muted:#5d6672; --line:#e3e7ec; --line2:#f1f3f6;
+  --bg:#ffffff; --surface:#f8fafc; --accent:#1f5fa9;
+  --ok:#1a7f4b; --warn:#a8630b; --bad:#b3261e; --r:8px;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.75 -apple-system,"PingFang SC","Microsoft YaHei",Segoe UI,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:960px;margin:0 auto;padding:44px 28px 90px}
+h1{font-size:27px;line-height:1.35;margin:0 0 6px;letter-spacing:.2px}
+h2{font-size:20px;margin:46px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+h3{font-size:16px;margin:26px 0 8px}
+h4{font-size:14.5px;margin:18px 0 6px;color:var(--muted);font-weight:600}
+p{margin:9px 0}
+.sub{color:var(--muted);margin:0 0 20px;font-size:14px}
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13.5px}
+th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--surface);font-weight:600}
+th.nw{white-space:nowrap}
+td code,p code,li code,th code{background:var(--surface);border:1px solid var(--line2);
+  border-radius:4px;padding:1px 5px;font-size:12.5px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+pre.wire{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  padding:14px 16px;overflow:auto;font-size:12.5px;line-height:1.6;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre}
+ul,ol{margin:9px 0;padding-left:1.4em}
+li{margin:4px 0}
+.meta{border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin:18px 0 8px}
+.meta table{margin:0;border:0}
+.meta th,.meta td{border:0;border-bottom:1px solid var(--line2)}
+.meta th{width:96px;background:var(--surface);white-space:nowrap}
+.toc{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  padding:14px 18px;margin:22px 0 0;font-size:13.5px;columns:2;column-gap:32px}
+.toc a{color:var(--accent);text-decoration:none}
+.toc div{break-inside:avoid;margin:3px 0}
+.note{border-left:3px solid var(--accent);background:var(--surface);
+  border-radius:0 var(--r) var(--r) 0;padding:10px 14px;margin:14px 0;font-size:13.5px}
+.note.warn{border-left-color:var(--warn)}
+.adr{border:1px solid var(--line);border-radius:var(--r);padding:12px 16px;margin:14px 0}
+.adr h3{margin:0 0 6px;font-size:15px}
+.adr dl{margin:0;font-size:13.5px}
+.adr dt{color:var(--muted);font-weight:600;margin-top:7px}
+.adr dd{margin:1px 0 0}
+footer{margin-top:60px;padding-top:16px;border-top:1px solid var(--line);
+  color:var(--muted);font-size:12.5px}
+@media (prefers-color-scheme:dark){
+  :root{--ink:#e6e9ee;--muted:#98a2b0;--line:#2b3138;--line2:#23282e;
+    --bg:#14171a;--surface:#1b1f24;--accent:#6aa8e8;--ok:#5fc08c;--warn:#e0a85c;--bad:#e88b84}
+}
+@media print{.toc{display:none}body{font-size:12px}.wrap{padding:0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>海上风电机组维检 Agent · 架构设计文档</h1>
+<p class="sub">系统结构、关键机制、接口契约与架构决策记录</p>
+
+<div class="meta">
+<table>
+<tr><th>文档版本</th><td>V1.0</td></tr>
+<tr><th>拟制日期</th><td>2026-09-18</td></tr>
+<tr><th>对应实现</th><td>分支 <code>main</code>，提交 <code>4a4e310</code>；模型 <code>qwen3.8-flash</code>（OpenAI 兼容端点）</td></tr>
+<tr><th>适用范围</th><td>问答服务、管理后台、评测与回放子系统</td></tr>
+<tr><th>关联文档</th><td>《原型设计文档》《验收标准文档》《设计说明》及四份专项测试报告</td></tr>
+</table>
+</div>
+
+<h4>修订记录</h4>
+<table>
+<tr><th class="nw">版本</th><th class="nw">日期</th><th>修订内容</th><th class="nw">拟制</th></tr>
+<tr><td>V1.0</td><td>2026-09-18</td><td>依据当前实现补齐架构文档：分层视图、运行时视图、关键机制、接口契约、ADR 与演进路线</td><td>架构组</td></tr>
+</table>
+
+<div class="toc">
+<div><a href="#s1">一、范围、约束与质量目标</a></div>
+<div><a href="#s2">二、系统上下文与部署视图</a></div>
+<div><a href="#s3">三、逻辑架构与模块职责</a></div>
+<div><a href="#s4">四、运行时视图</a></div>
+<div><a href="#s5">五、关键机制</a></div>
+<div><a href="#s6">六、数据模型</a></div>
+<div><a href="#s7">七、接口契约</a></div>
+<div><a href="#s8">八、非功能设计</a></div>
+<div><a href="#s9">九、架构决策记录（ADR）</a></div>
+<div><a href="#s10">十、已知缺口与风险</a></div>
+<div><a href="#s11">十一、演进路线与阶段目标</a></div>
+</div>
+
+<h2 id="s1">一、范围、约束与质量目标</h2>
+
+<h3>1.1 业务范围</h3>
+<p>对四类资料做路由、检索与多步取证，融合成带依据的回答，并显式区分
+<b>资料支持的事实</b>与<b>现有资料无法确认的事项</b>：</p>
+<table>
+<tr><th class="nw">资料</th><th class="nw">介质</th><th>结构特征</th><th>典型问题</th></tr>
+<tr><td>运行告警记录</td><td>SQLite 表 <code>alarm_records</code></td><td>结构化，按风机 / 故障码 / 时间筛选与计数</td><td>型号、最近状态、时段告警</td></tr>
+<tr><td>维检工单记录</td><td>SQLite 表 <code>maintenance_records</code></td><td>结构化，含自由文本 <code>resolution_note</code></td><td>优先级、备件、观察时长</td></tr>
+<tr><td>故障处理手册</td><td>Markdown，按故障代码分节（9 节）</td><td>每节四个固定子标题</td><td>触发条件、常见原因、处理步骤</td></tr>
+<tr><td>检修作业与安全管理规程</td><td>Markdown，按「第 x.x 条」分条（25 条）</td><td>条款即最小判定单位</td><td>重复故障、禁止复位、关单与换件合规</td></tr>
+</table>
+
+<h3>1.2 强约束</h3>
+<ol>
+<li><b>不得将整个数据库或文档放入模型上下文</b>——这是硬红线，由运行时预算机制拦截，不靠事后统计。</li>
+<li><b>结论必须可追溯</b>：展示所依据的数据表、文档或章节，且展示内容必须来自真实发生过的工具调用。</li>
+<li><b>资料不足时必须明确说明"现有资料无法确认，需要现场核实"</b>（规程第 1.2 / 1.3 条），不得推测。</li>
+<li>只读访问业务数据，任何路径都不得写库。</li>
+<li>当前交付形态为单机单进程，不含鉴权、并发治理与持久化存储。</li>
+</ol>
+
+<h3>1.3 质量目标与取舍优先级</h3>
+<table>
+<tr><th class="nw">优先级</th><th class="nw">质量属性</th><th>设计对应</th></tr>
+<tr><td>1</td><td>正确性 / 不编造</td><td>规程算术下沉为代码、证据由代码汇总、接地校验、断言化回归</td></tr>
+<tr><td>2</td><td>安全性</td><td>四层只读守卫、参数白名单、上下文预算、施压用例常态化</td></tr>
+<tr><td>3</td><td>可复核性</td><td>span 级链路追踪、证据可展开到原文、口径显性标注</td></tr>
+<tr><td>4</td><td>可维护性</td><td>判定逻辑单点实现（页面与命令行共用）、工具计量注册表 + 测试守卫</td></tr>
+<tr><td>5</td><td>延迟</td><td>让等待可见优先于压低总耗时；可控项（工具调用次数、答案长度）单独治理</td></tr>
+</table>
+
+<h2 id="s2">二、系统上下文与部署视图</h2>
+
+<pre class="wire">
+                     ┌──────────────────────────────┐
+   使用者 ──HTTP────►│  单进程 · 单端口（默认 8000）│
+   复核 / 运维 ─────►│  FastAPI + Uvicorn           │
+                     │  ├ /          问答页          │
+                     │  ├ /ask, /ask/stream (SSE)   │
+                     │  ├ /admin     管理后台        │
+                     │  ├ /api/eval*  /api/quality/* │
+                     │  ├ /api/traces*               │
+                     │  └ /health                    │
+                     └───┬───────────┬──────────┬────┘
+                         │           │          │
+          只读 SQLite ◄──┘           │          └──► 进程内链路留存（最近 50 条，重启即清空）
+       data/海上风电维检.db          │
+                                      └──► OpenAI 兼容模型端点（DashScope · qwen3.8-flash）
+          Markdown 资料（手册 / 规程）──► 启动时切块建索引（进程内）
+          eval/out/*.json 落盘产物 ───► 评测视图 + 离线回放素材
+</pre>
+
+<table>
+<tr><th class="nw">要素</th><th>说明</th></tr>
+<tr><td>进程模型</td><td>单进程单端口。后台路由以 <code>APIRouter</code> 挂进同一 app：链路留存是内存态，拆进程后后台读不到问答侧的记录</td></tr>
+<tr><td>外部依赖</td><td>仅模型端点一项（<code>LLM_BASE_URL</code> + <code>DASHSCOPE_API_KEY</code>）。无外网时 <code>REPLAY_MODE=true</code> 走离线回放</td></tr>
+<tr><td>状态</td><td>业务数据只读；链路留存与检索索引在内存；评测产物落盘为 JSON，无数据库</td></tr>
+<tr><td>启动</td><td><code>python app.py</code> 或 <code>uvicorn app:app</code>；启动即预热检索索引与分词词典，把冷启动代价从第一个提问挪到启动侧</td></tr>
+<tr><td>配置</td><td><code>LLM_MODEL</code> / <code>ENABLE_THINKING</code> / <code>AGENT_MAX_STEPS</code>（默认 6）/ <code>GROUNDING_MODE</code>（默认 shadow）/ <code>REPLAY_MODE</code> / <code>PORT</code></td></tr>
+</table>
+
+<h2 id="s3">三、逻辑架构与模块职责</h2>
+
+<pre class="wire">
+┌ 接入层 ───────────────────────────────────────────────────────┐
+│ app.py            /ask、/ask/stream（SSE）、/health、静态页     │
+│ admin.py          /admin、/api/eval、/api/quality/online、      │
+│                   /api/traces（APIRouter，同进程）              │
+└───────────────┬───────────────────────────────────────────────┘
+┌ 编排层 ───────▼───────────────────────────────────────────────┐
+│ agent/loop.py      Function Calling 循环 · 流式事件 · 首步强制   │
+│                    检索 · 未取证拦截与范围外出口                │
+│ agent/prompts.py   系统提示词（注入 schema，不注入表数据）       │
+│ agent/tools_spec.py 工具 JSON Schema 与执行注册表                │
+│ agent/composer.py  三段解析 · 证据与数据源汇总 · 未完成项归并    │
+│ agent/checklist.py 规则判定 → 现场核实清单（三态）              │
+│ agent/grounding.py 接地校验 off / shadow / enforce               │
+└───────────────┬───────────────────────────────────────────────┘
+┌ 工具层 ───────▼───────────────────────────────────────────────┐
+│ tools/db.py        四层只读守卫 + schema 提示词                 │
+│ tools/retriever.py 标题切块 · BM25 + 精确加权 · 码→节映射       │
+│ tools/rules.py     六条规程规则（纯函数，零 LLM 依赖）          │
+│ tools/budget.py    上下文预算计量与运行时拦截（METERS 注册表）  │
+│ tools/pricing.py   计价（单价注明核对日期，缓存命中单独折算）    │
+└───────────────┬───────────────────────────────────────────────┘
+┌ 观测与评测层 ─▼───────────────────────────────────────────────┐
+│ agent/tracing.py   span 模型、P95、耗时分桶（单点实现）         │
+│ agent/tracestore.py 进程内留存最近 50 条 + 诊断标注             │
+│ agent/evalview.py  产物读取、指标计算、快照与涨跌               │
+│ eval/verdict.py    用例判定（跑测器与后台共用）                 │
+│ agent/replay.py    离线回放匹配（覆盖度 + 标识符硬门）          │
+└───────────────────────────────────────────────────────────────┘
+</pre>
+
+<div class="note"><b>一条贯穿全局的规则：同一判定只能有一份实现。</b>
+用例判定归 <code>eval/verdict.py</code>、P95 归 <code>agent/tracing.py</code>、
+数据源反推归 <code>composer.detect_sources</code>。两处各写一套必然随时间漂移，
+而"同一件事在两个地方给出不同结论"是最难排查的一类缺陷。</div>
+
+<h2 id="s4">四、运行时视图</h2>
+
+<h3>4.1 多步问答主链路</h3>
+<pre class="wire">
+提问
+ │
+ ├─► 系统提示词（含库表 schema、文档目录、判定纪律；不含任何数据行）
+ │
+ ├─► 模型决策轮 ①  ── 首步强制检索：不调工具即打回
+ │      └─ 工具调用请求 → 上下文预算预检 ──超额──► 拒绝 + 回灌「请缩小查询范围」（不计费）
+ │                          │
+ │                          └─放行─► 执行工具 → 计量入账 → 结果回填消息
+ │
+ ├─► 模型决策轮 ②③…（≤ AGENT_MAX_STEPS = 6）
+ │      typical：query_db → search_docs → check_rule → get_doc_section
+ │
+ ├─► 终局输出：固定三段标题（## 结论 / ## 依据 / ## 现有资料无法确认）
+ │      └─ 未取证拦截：两次未调工具 → 拒答（合规出口见下）
+ │
+ ├─► composer：三段解析 → 证据汇总（tables / docs / rules）→ 数据源反推
+ │              → 核实清单构造 → 未完成项与截断说明归并
+ │
+ ├─► grounding：数值与条款号是否有证据支撑（默认 shadow 只标注）
+ │
+ └─► 返回 + 链路留存（source=online / eval）
+</pre>
+
+<h3>4.2 SSE 事件协议</h3>
+<table>
+<tr><th class="nw">事件</th><th>载荷</th><th>界面动作</th></tr>
+<tr><td><code>thinking</code></td><td><code>message</code></td><td>显示"正在判断需要查询哪些资料…"</td></tr>
+<tr><td><code>step</code></td><td><code>step</code>：序号、工具名、输入摘要、是否被拒绝、结果摘要</td><td>时间线追加一行</td></tr>
+<tr><td><code>token</code></td><td><code>text</code>（答案增量）</td><td>答案逐字浮现；仅在见到 <code>## 结论</code> 之后推送</td></tr>
+<tr><td><code>answer_reset</code></td><td>—</td><td>撤销已渲染正文（同一轮既出标题又发起工具调用时）</td></tr>
+<tr><td><code>composing</code></td><td><code>message</code></td><td>显示"正在整理结论与依据…"</td></tr>
+<tr><td><code>done</code></td><td><code>result</code>（完整回答契约）</td><td>渲染完成态</td></tr>
+<tr><td><code>error</code></td><td><code>kind</code> ∈ <code>not_configured / llm_error / replay_miss</code></td><td>失败文案，不白屏</td></tr>
+</table>
+<p>非流式 <code>POST /ask</code> 保留，供回归跑测与离线回放调用——两条路径共用同一套编排与解析，
+只是消费方式不同。</p>
+
+<h3>4.3 异常与降级路径</h3>
+<table>
+<tr><th class="nw">情形</th><th>处理</th><th>留痕</th></tr>
+<tr><td>SQL 被守卫拒绝 / 执行报错</td><td>错误文本回灌模型，允许重写一次</td><td><code>TOOL</code> span 记 DEGRADED</td></tr>
+<tr><td>上下文预算超额</td><td>拒绝该次调用并回灌可执行的修正建议；该调用不计费</td><td><code>GUARD</code> span 记 DEGRADED</td></tr>
+<tr><td>未取证即作答</td><td>打回要求先检索；二次仍不调工具则拒答</td><td><code>GUARD</code> span；后台计入"未取证拒答率"</td></tr>
+<tr><td>问题不落在四类资料内</td><td>合规出口：结论段首句写明"该问题超出随题资料范围"即放行，不逼模型查无关资料凑数</td><td>正常收口</td></tr>
+<tr><td>模型超时 / 网关异常</td><td>返回明确错误文案</td><td>失败链路仍进留存，使成功率有分母</td></tr>
+<tr><td>三段解析失败</td><td>降级为原文显示，并在界面标注已降级</td><td>不伪装成解析成功</td></tr>
+<tr><td>撞步数上限</td><td>收口成文并给出"本轮未完成查询"卡（已执行几步、哪类资料整轮未读）</td><td>链路完成率分子不计</td></tr>
+</table>
+
+<h2 id="s5">五、关键机制</h2>
+
+<h3>5.1 工具契约</h3>
+<p>四个工具，六条规则收在 <code>check_rule</code> 一个工具里用 <code>enum</code> 区分而不是拆成六个：
+工具数量超过五六个后模型选错工具的概率明显上升，收成一个之后模型的决策从"在九个工具里挑"
+降级为"挑对一个工具 + 挑对一个枚举值"，且新增规则不必改动工具清单。</p>
+<table>
+<tr><th class="nw">工具</th><th>入参</th><th>返回</th><th>span 类型</th></tr>
+<tr><td><code>query_db</code></td><td><code>sql</code>（单条 SELECT）</td><td>列名、行、行数、错误文本</td><td>TOOL</td></tr>
+<tr><td><code>search_docs</code></td><td><code>query</code>、<code>doc</code>（枚举）、<code>top_k</code>（默认 4）</td><td>标题 + 160 字摘要；命中无悬念时直接带回 top-1 全文</td><td>RAG</td></tr>
+<tr><td><code>get_doc_section</code></td><td><code>doc</code>、<code>section_id</code>（如 <code>24002</code> / <code>4.1</code>）</td><td>该节全文</td><td>RAG</td></tr>
+<tr><td><code>check_rule</code></td><td><code>rule</code>（六选一）、<code>turbine_id</code> / <code>fault_code</code> / <code>work_order_id</code> / 窗口起止等参数白名单</td><td>判定结论、逐项事实、引用条款号与 <code>clause_texts</code> 内联原文</td><td>RULE</td></tr>
+</table>
+
+<h3>5.2 只读访问的四层守卫</h3>
+<table>
+<tr><th class="nw">层</th><th>手段</th><th>是否安全边界</th></tr>
+<tr><td>L1 连接层</td><td>URI <code>mode=ro</code>，SQLite 引擎层面拒绝写</td><td>是</td></tr>
+<tr><td>L2 会话层</td><td><code>PRAGMA query_only = ON</code></td><td>是</td></tr>
+<tr><td>L3 授权层</td><td><code>set_authorizer</code> 白名单：只放行 SELECT / READ / FUNCTION；表级白名单 <code>alarm_records</code>、<code>maintenance_records</code></td><td>是</td></tr>
+<tr><td>L4 语句层</td><td>单语句、SELECT/WITH 开头、关键字黑名单、自动补 <code>LIMIT 200</code>、2 秒超时</td><td>否（主要职责是给出模型看得懂的错误信息以便重写）</td></tr>
+</table>
+<p>L4 排在最后是刻意的：正则是最弱的一环。回归中有一条<b>绕过 L4 直连数据库</b>的用例，验证 L1~L3 仍拒绝写入。</p>
+
+<h3>5.3 上下文预算：把红线做成运行时机制</h3>
+<table>
+<tr><th class="nw">档位</th><th>阈值</th><th>语料基数</th><th>作用</th></tr>
+<tr><td>数据行合计</td><td>50%</td><td>62 行 → 31 行</td><td>防"把库搬进上下文"</td></tr>
+<tr><td>文档字符合计</td><td>70%</td><td>6538 字符 → 4576 字符</td><td>防跨文档累计搬运</td></tr>
+<tr><td><b>单份文档</b></td><td>60%</td><td>按各文档全文单独计</td><td><b>实际承重层</b>：合计档拦不住"把一份文档搬空"（手册全文仅占合计语料 57%）</td></tr>
+</table>
+<ul>
+<li>每次工具调用<b>前</b>预检，超额即拒绝并回灌修正建议；<b>被拒绝的调用不计费</b>，反复尝试也无法绕过。</li>
+<li>累计计量，分多次少量取回同样会被拦住；<code>check_rule</code> 内联的条款原文一并计入。</li>
+<li>单份文档档<b>只判覆盖，不判取回</b>——该口径是实跑标定出来的：按取回口径两档都判时，26 条用例误伤 3 次，全部出在取回侧（通则调用把条款原文内联两次即顶到上限，而去重后其实只读了规程的三分之一）。重复取回由合计取回档兜底。</li>
+<li>用量随回答返回（<code>meta.budget</code>），可在界面查看与事后审计。</li>
+</ul>
+<div class="note warn"><b>三处已知缺口，不应说成"全都管住了"</b>：
+① 预算只计量语料内容，不计量提示词总长（SQL 文本、工具参数、历史消息不在其中，由步数上限间接兜底）；
+② 计量规则以注册表 <code>METERS</code> 维护，未登记的工具按结果字符数保守计入文档预算，并有测试守卫断言注册表全覆盖；
+③ 规则引擎自查的行不计入数据行预算——口径是刻意的（预算计的是<em>进入上下文</em>的语料，进去的是算完的结论），
+代价是水位读数低于系统实际触达的语料量。</div>
+
+<h3>5.4 规程判定下沉为代码</h3>
+<table>
+<tr><th class="nw">规则</th><th class="nw">依据条款</th><th>输出</th></tr>
+<tr><td><code>repeat_fault</code></td><td>3.1</td><td>任意连续 24 小时滑动窗口的最大次数、各次时间、窗口外被排除的记录</td></tr>
+<tr><td><code>priority_required</code></td><td>2.1~2.4</td><td>应有优先级与现有工单是否需要升级</td></tr>
+<tr><td><code>work_order_assessment</code></td><td>2.4 / 7.1~7.2</td><td>优先级、状态、处理记录、观察时间、备件五项逐项核对</td></tr>
+<tr><td><code>remote_reset_ban</code></td><td>4.1~4.2</td><td>五款逐款核对结果</td></tr>
+<tr><td><code>close_compliance</code></td><td>6.1~6.5</td><td>七项必备记录、EEPROM 附加项、120 分钟观察门限</td></tr>
+<tr><td><code>replace_precondition</code></td><td>5.1~5.2 / 7.3</td><td>九项前置条件逐项标注满足 / 不满足 / 无法确认</td></tr>
+</table>
+<p>次数、时长、阈值比较一律由代码计算，模型只负责引用结论。理由是这类算术模型算错时错得很自然：
+以重复故障为例，第 3.1 条要求的是<b>任意连续 24 小时</b>，若按自然日分组，某台风机的五条告警会被算成
+3 次加 1 次，结论碰巧仍成立但过程是错的，换一组数据就会翻车。</p>
+<p>两处判定口径需特别说明：</p>
+<ul>
+<li><b>第 4.1 条第 4 款"无法确认设备安全状态"不自动判成立。</b>数据库永远不记录设备安全状态，
+判其成立则该款恒为真、失去判别力；判其不成立又违背第 1.3 条保守处置原则。
+因此标注为"资料无法确认"并援引第 1.3 条，保持为待现场核实项。</li>
+<li><b>第 6.1 条七项记录为关键词启发式。</b><code>resolution_note</code> 是自由文本，无法精确判定，
+因此一并返回备注原文，并在无法确认项中写明应由人工对照复核。</li>
+</ul>
+
+<h3>5.5 检索设计</h3>
+<table>
+<tr><th class="nw">要素</th><th>设计</th><th>理由</th></tr>
+<tr><td>切块单位</td><td>手册按 <code>###</code> 故障码（9 块）、规程按「第 x.x 条」（25 块）</td><td>召回结果天然就是"章节或条款"，可直接作为依据展示，无需二次定位</td></tr>
+<tr><td>打分</td><td>自实现 BM25 + 精确命中加权（故障码 +5、条款号 +5、标题全词 +3）+ 停用词表</td><td>语料仅约 16 KB，向量库在此规模属过度设计且不可解释</td></tr>
+<tr><td>码→节映射</td><td>库内 <code>24002</code> ↔ 手册标题 <code>24002_SC_变流器心跳</code></td><td>不建映射则模型拿库里查到的裸码去检索会<b>静默落空</b>——不报错、答案照出，最难发现</td></tr>
+<tr><td>两段取回</td><td><code>search_docs</code> 只回摘要，<code>get_doc_section</code> 才回全文</td><td>进入上下文的永远只有模型明确点名的那一节</td></tr>
+<tr><td>内联 top-1</td><td>命中无悬念（精确锚点命中或 top1 ≥ 2.5 × top2）时直接带回 top-1 全文，且只带一节</td><td>省一次往返（一轮 3~5 秒）；带四节全文就不是检索而是搬运，正踩红线</td></tr>
+<tr><td>召回回归</td><td>37 条检索探针（<code>retrieval_probes.yaml</code>），由单元测试消费，不走模型</td><td>漏召回是<b>静默</b>的：链路显示"命中 4 节"是绿的，而该命中的那节排在第 9——单条查询自身分不出漏没漏</td></tr>
+</table>
+
+<h3>5.6 证据链与接地校验</h3>
+<ul>
+<li><code>evidence</code> 与 <code>sources</code> <b>不由模型自报</b>，而是从真实发生过的工具调用中汇总：执行过哪条 SQL、取回过哪一节、调用过哪条规则。这样"依据展示"在结构上就不可能被编造。</li>
+<li>模型只负责结论文本与"无法确认"清单，按固定三段标题输出，由代码确定性解析；解析失败降级为原文显示并标注。</li>
+<li>"依据"段由代码从证据渲染而非模型复述：既省生成时间（约 300 字符 ≈ 3~4 秒），又少一次转述漂移的机会。<b>踩过的坑</b>：删掉依据段后模型输出反而变长——提示词里唯一的长度纪律恰好写在该段说明里，删段时连带删掉了它，必须为结论段补回独立的长度约束。</li>
+<li><code>grounding.py</code> 校验答案中的数值与条款号是否在证据中出现过，分 <code>off / shadow / enforce</code> 三档，默认 <code>shadow</code> 只标注。<b>会误伤正确结果的判定层必须先影子跑标定再切拦截</b>。</li>
+</ul>
+
+<h3>5.7 可观测：span 模型与两档质量口径</h3>
+<table>
+<tr><th class="nw">span</th><th>覆盖</th><th>状态</th></tr>
+<tr><td><code>MODEL</code></td><td>每次模型调用，带 Token 与折算成本</td><td rowspan="5"><code>OK</code> / <code>DEGRADED</code>（按预期收紧）/ <code>ERROR</code></td></tr>
+<tr><td><code>TOOL</code></td><td><code>query_db</code></td></tr>
+<tr><td><code>RAG</code></td><td><code>search_docs</code> / <code>get_doc_section</code></td></tr>
+<tr><td><code>RULE</code></td><td><code>check_rule</code></td></tr>
+<tr><td><code>GUARD</code></td><td>预算拦截、未取证打回、接地校验</td></tr>
+</table>
+<p>护栏单独成类且可标 <code>DEGRADED</code> 是刻意的：预算拦截与未取证打回都不是错误，
+而是系统按预期收紧了行为——这类事件若不留痕，事后无法判断链路为何变短。</p>
+<p>质量指标分两档且<b>分母互不相交</b>：离线评测（固定用例 + 断言，判得出对错）与线上质量
+（真实流量，没有标准答案，一个"准确率"都不出现）。后台执行的回归链路标 <code>source=eval</code>，
+一条都不进线上质量；两档也不合成"综合质量分"——合成后没人说得清分数变动是用例挂了还是线上降级了。</p>
+
+<h3>5.8 离线回放</h3>
+<p><code>eval/run.py</code> 的产物同时充当回放素材。匹配采用<b>问句覆盖度 + 标识符硬门</b>：
+问句中出现的风机编号、故障代码、工单编号必须在被匹配用例中同样出现，否则直接拒绝。
+仅用文本相似度会出错——"T20 的型号是什么？"与"T01 的风机型号是什么？"覆盖度达 0.86，
+而 T20 并不在库中（库内为 T01~T09）。</p>
+
+<h2 id="s6">六、数据模型</h2>
+
+<h3>6.1 业务表（只读）</h3>
+<table>
+<tr><th class="nw">表</th><th>关键字段</th><th>约定</th></tr>
+<tr><td><code>alarm_records</code></td><td><code>alarm_id</code>、<code>turbine_id</code>（T01~T09）、<code>turbine_model</code>、<code>turbine_status</code>（RUNNING/STOPPED/MAINTENANCE/LIMITED）、<code>fault_code</code>（裸码）、<code>fault_name</code>、<code>severity</code>、<code>occurred_at</code>、<code>alarm_status</code></td><td rowspan="2">时间为文本、按<b>闭区间</b>比较；数据覆盖 2026-07-01 ~ 2026-07-20；关联工单与告警必须<b>同时</b>用 <code>turbine_id</code> 与 <code>fault_code</code>，只用其一会串到别的风机或别的故障；<code>COMPLETED</code> 只是工单状态，不能证明关闭过程合规（第 6.5 条）</td></tr>
+<tr><td><code>maintenance_records</code></td><td><code>work_order_id</code>、<code>turbine_id</code>、<code>fault_code</code>、<code>priority</code>（NORMAL/HIGH/EMERGENCY）、<code>status</code>（OPEN/PLANNED/IN_PROGRESS/COMPLETED/CANCELLED）、<code>created_at</code>、<code>resolution_note</code>、<code>observation_minutes</code>、<code>required_part</code>、<code>part_available</code></td></tr>
+</table>
+<p>库表 schema 以文本形式注入系统提示词（含字段语义、关联约定与三条示例 SQL），<b>但不注入任何数据行</b>——
+模型能写 SQL，却看不到一条记录。</p>
+
+<h3>6.2 回答契约</h3>
+<table>
+<tr><th class="nw">字段</th><th>类型</th><th>来源</th></tr>
+<tr><td><code>answer</code></td><td>string</td><td>模型「结论」段</td></tr>
+<tr><td><code>basis</code></td><td>string[]</td><td>代码从证据渲染</td></tr>
+<tr><td><code>unverifiable</code></td><td>string[]</td><td>模型「现有资料无法确认」段 + 规则判定的 pending 项</td></tr>
+<tr><td><code>incomplete</code> / <code>truncation</code></td><td>string[] / object</td><td>该判未判项（模型自陈）/ 机器事实（已执行步数、整轮未读的资料）</td></tr>
+<tr><td><code>checklists</code></td><td>object[]</td><td>规则判定 → 三态清单（<code>ok</code> / <code>blocked</code> / <code>pending</code>）</td></tr>
+<tr><td><code>sources</code></td><td>string[]</td><td>代码从工具调用反推</td></tr>
+<tr><td><code>evidence</code></td><td>{tables, docs, rules}</td><td>真实工具调用的原始 SQL、命中行、章节全文、规则事实</td></tr>
+<tr><td><code>trace</code></td><td>object[]</td><td>逐步轨迹</td></tr>
+<tr><td><code>meta</code></td><td>object</td><td>耗时、Token、成本、<code>budget</code> 水位、回放标识、接地档位</td></tr>
+</table>
+
+<h3>6.3 观测数据</h3>
+<table>
+<tr><th class="nw">数据</th><th>存放</th><th>容量 / 生命周期</th></tr>
+<tr><td>链路留存</td><td>进程内 <code>tracestore</code></td><td>最近 50 条，重启即清空（页面明写）</td></tr>
+<tr><td>评测产物</td><td><code>eval/out/&lt;用例号&gt;.json</code></td><td>每条用例保留<b>最近一次</b>结果；页面给出落盘时间跨度</td></tr>
+<tr><td>指标快照</td><td><code>eval/out/_history.jsonl</code></td><td>append-only 流水；页面比最后两条算涨跌</td></tr>
+</table>
+
+<h2 id="s7">七、接口契约</h2>
+<table>
+<tr><th class="nw">方法 / 路径</th><th>用途</th><th>返回要点</th></tr>
+<tr><td><code>GET /health</code></td><td>健康检查</td><td>库表行数、文档块数、故障码映射数、当前模式（回放 / 接地档位 / 模型 / 思考开关）</td></tr>
+<tr><td><code>POST /ask</code></td><td>非流式问答（跑测与回放）</td><td>完整回答契约；失败带 <code>kind</code></td></tr>
+<tr><td><code>POST /ask/stream</code></td><td>流式问答（界面）</td><td>SSE，事件见 4.2；<code>Cache-Control: no-cache</code>、<code>X-Accel-Buffering: no</code></td></tr>
+<tr><td><code>GET /</code> · <code>GET /admin</code></td><td>页面</td><td><code>Cache-Control: no-store</code>，避免改版后取到旧界面</td></tr>
+<tr><td><code>GET /api/eval</code></td><td>离线评测视图</td><td>四套用例的条目、指标（含口径注脚）、批次信息、涨跌</td></tr>
+<tr><td><code>POST /api/eval/run</code></td><td>现场执行用例</td><td>SSE 逐条回报；与命令行共用 <code>verdict.py</code>；同步更新落盘产物</td></tr>
+<tr><td><code>GET /api/quality/online</code></td><td>线上质量</td><td>服务达成、回答可用性、执行健康、代价、红线水位、最近问答</td></tr>
+<tr><td><code>GET /api/traces</code> · <code>/api/traces/{id}</code></td><td>链路列表与明细</td><td>导航统计 + span 明细（输入输出、耗时、状态）</td></tr>
+</table>
+<p>提问输入限制 1~500 字符（<code>pydantic</code> 校验）。所有接口无鉴权，形态为单机单用户。</p>
+
+<h2 id="s8">八、非功能设计</h2>
+
+<h3>8.1 延迟</h3>
+<p>逐次调用埋点的结论与直觉相反：</p>
+<table>
+<tr><th class="nw">成本项</th><th>实测</th><th>结论</th></tr>
+<tr><td>网络往返与最小调用开销</td><td>0.84s</td><td>改为按配置缓存客户端，避免每题重做 TCP + TLS 握手</td></tr>
+<tr><td>系统提示词预填充（5792 字符）</td><td>≈ 0s</td><td><b>精简提示词无收益</b>，却会损失 SQL 生成质量与判定纪律——这条常见优化在此被证伪</td></tr>
+<tr><td>工具执行（SQL、BM25、规则）</td><td>0.92s，占 5%</td><td>检索不是瓶颈（SQL 3.3ms、BM25 热态 0.2ms）</td></tr>
+<tr><td>生成最终答案</td><td>13.08s，占 69%</td><td><b>耗时 ≈ 串行模型轮数 × 每轮输出长度</b>，治理方向由此确定</td></tr>
+</table>
+<p>据此的三项改造：依据段改代码渲染、<code>search_docs</code> 内联 top-1 省一次往返、连接复用与启动预热。
+26 条用例实测 P50 17.6s → 13.2s（−25%）、合计 538.5s → 377.0s（−30%）、一步题 P50 11.2s → 6.6s。
+但端到端耗时在不同批次间波动很大（同一用例曾录得 12.5s 与 42.1s，工具调用次数仅差 1），
+因此<b>不宣称</b>可复现的总耗时收益；可复现的是答案长度下降与首字时间的机制性改变。</p>
+<div class="note">混算的分位数描述的是<b>题目难度分布</b>而不是系统性能，因此指标按工具调用次数分桶给出：
+1 步 / 2-3 步 / 4 步以上各自的 P50 与 P95。</div>
+
+<h3>8.2 成本</h3>
+<p>Token 与成本来自流式返回的 <code>usage</code>；缓存命中的输入按官方缓存单价<b>单独折算</b>
+（按标准输入价计算会明显高估）。单价集中在 <code>tools/pricing.py</code> 并注明核对日期，可用环境变量覆盖——
+写死一个记忆中的数字，会让整张成本表在毫无察觉的情况下全错。</p>
+
+<h3>8.3 可靠性与安全</h3>
+<ul>
+<li>失败也留痕：模型超时或网关报错时留下 <code>ERROR</code> 的 <code>MODEL</code> span，整条链路以 <code>FAILED</code> 进留存——只统计跑通的链路会让成功率恒为 100%，等于装饰。</li>
+<li><b>威胁模型：不是注入，是施压。</b>资料是静态可信文件，唯一外部输入是提问者自己的问题，而提问者即操作者，不存在需要跨越的权限边界；SQL 注入这条真实路径由四层守卫与规则参数白名单拦截。真正的风险是用户要求系统放弃保守判定，为此单列 9 条施压用例（含索要提示词、角色扮演、伪造工具结果、伪 system 覆盖四种注入形态）持续检验。</li>
+<li>业务数据全程只读；系统不提供任何写入路径，用户要求"改数据"时明确拒绝并说明库中值未变化。</li>
+</ul>
+
+<h2 id="s9">九、架构决策记录（ADR）</h2>
+
+<div class="adr"><h3>ADR-01　不引入 Agent 框架</h3><dl>
+<dt>决策</dt><dd>采用原生 Function Calling 循环（核心约 150 行）。</dd>
+<dt>备选</dt><dd>LangGraph / LangChain。</dd>
+<dt>理由</dt><dd>本场景为四个工具、至多六步、单轮问答、无需断点续跑；框架的调度抽象与依赖成本高于收益，且会削弱执行轨迹的可控性，而轨迹展示是硬性要求。</dd>
+<dt>代价 / 触发再评估</dt><dd>扩展到多轮会话、断点续跑或人工介入审批时，引入 checkpoint 机制是合理演进。</dd></dl></div>
+
+<div class="adr"><h3>ADR-02　检索单位 = 一个标题小节</h3><dl>
+<dt>决策</dt><dd>按故障码小节与「第 x.x 条」切块，检索即返回可直接展示的依据单位。</dd>
+<dt>代价</dt><dd>块粒度受文档标题结构约束；换一套排版需调整切块规则。</dd></dl></div>
+
+<div class="adr"><h3>ADR-03　BM25 + 精确加权，不引入向量库</h3><dl>
+<dt>理由</dt><dd>语料约 16 KB，精确匹配加权已能把目标章节稳定顶到首位，且可解释。</dd>
+<dt>代价</dt><dd>不具备语义泛化：问法与文档用词完全不同时（只说"心跳丢了"不提故障码）召回质量下降。演进方向为 RRF 混合。</dd></dl></div>
+
+<div class="adr"><h3>ADR-04　规程判定下沉为代码，模型只引用结论</h3><dl>
+<dt>理由</dt><dd>滑动窗口、阈值比较这类算术，模型算错时错得很自然、不易察觉。</dd>
+<dt>代价</dt><dd>规则与本规程绑定（条款号、阈值、必备记录项硬编码），换制度需改代码；演进方向为规则配置化。</dd></dl></div>
+
+<div class="adr"><h3>ADR-05　六条规则收进一个工具</h3><dl>
+<dt>理由</dt><dd>工具数量超过五六个后模型选错工具概率明显上升；收成一个后新增规则不必改动工具清单。</dd>
+<dt>代价</dt><dd>单个工具的参数面变宽，需以参数白名单与枚举说明约束。</dd></dl></div>
+
+<div class="adr"><h3>ADR-06　代码侧强制首步检索，而非依赖厂商参数</h3><dl>
+<dt>背景</dt><dd>最初用 <code>tool_choice="required"</code>，但 qwen3 系列在思考模式下不支持该参数。</dd>
+<dt>决策</dt><dd>改为代码侧拦截：未调工具即打回要求先检索，二次仍不调则拒答；另设范围外合规出口，避免逼模型查无关资料凑数。</dd></dl></div>
+
+<div class="adr"><h3>ADR-07　证据由代码汇总，不经模型转述</h3><dl>
+<dt>理由</dt><dd>依据展示在结构上就不可能被编造，用户看到的 SQL 与章节原文一定是系统实际用过的。</dd></dl></div>
+
+<div class="adr"><h3>ADR-08　接地校验默认 shadow</h3><dl>
+<dt>理由</dt><dd>会误伤正确结果的判定层必须先积累真实误判样本；本机构造的样例想不出真实误判形状，离线重放也标不出来。</dd>
+<dt>触发切换</dt><dd>误判样本沉淀为回归用例且连续两轮零误伤后切 <code>enforce</code>。</dd></dl></div>
+
+<div class="adr"><h3>ADR-09　单份文档预算档只判覆盖不判取回</h3><dl>
+<dt>背景</dt><dd>两档都判时实跑误伤 3 次，全部出在取回侧。</dd>
+<dt>理由</dt><dd>红线问的是"整份文档是不是被搬进去了"，那本来就是去重口径的问题；重复取回由合计取回档兜。</dd>
+<dt>教训</dt><dd><b>会误伤的新判据，光靠产物离线复算标不出真实的误伤形状，必须真跑一轮。</b></dd></dl></div>
+
+<div class="adr"><h3>ADR-10　观测不落库、诊断与度量分页</h3><dl>
+<dt>决策</dt><dd>链路进程内留存 50 条；链路页不出聚合指标，聚合口径统一归质量中心，且离线与线上两档分母互不相交。</dd>
+<dt>理由</dt><dd>引入持久化会带来新的状态与故障模式；同一指标在两处按不同口径并存，会让人在两个正确的数字之间怀疑系统坏了。</dd>
+<dt>代价</dt><dd>重启后线上样本清零，页面显式写明样本量与时间窗。</dd></dl></div>
+
+<h2 id="s10">十、已知缺口与风险</h2>
+<table>
+<tr><th class="nw">#</th><th>缺口</th><th>影响</th><th>缓解</th></tr>
+<tr><td>1</td><td>多步问题耗时偏高（最长约 35s）</td><td>现场等待体验</td><td>流式让等待可见；工具调用次数已由条款内联下降 32%</td></tr>
+<tr><td>2</td><td>关单七项为关键词启发式</td><td>自由文本判定不精确</td><td>一并返回备注原文，并在无法确认项中写明须人工复核</td></tr>
+<tr><td>3</td><td>接地校验未启用拦截</td><td>编造数值只标注不阻断</td><td>shadow 标定中；另有确定性证据汇总与断言回归兜底</td></tr>
+<tr><td>4</td><td>BM25 无语义泛化</td><td>口语化问法召回下降</td><td>37 条检索探针回归；演进为 RRF 混合</td></tr>
+<tr><td>5</td><td>单轮问答</td><td>不支持追问与代词指代</td><td>界面不提供会话线，避免用户误以为有上下文</td></tr>
+<tr><td>6</td><td>规则与本规程绑定</td><td>换制度需改代码</td><td>演进为规则配置化</td></tr>
+<tr><td>7</td><td>无鉴权、并发与持久化</td><td>仅适用于单机单用户形态</td><td>已在文档与页面显式声明为当前交付边界</td></tr>
+<tr><td>8</td><td>预算不计量提示词总长</td><td>历史消息累积不受计量</td><td>由 <code>AGENT_MAX_STEPS=6</code> 间接兜底</td></tr>
+</table>
+
+<h2 id="s11">十一、演进路线与阶段目标</h2>
+<table>
+<tr><th class="nw">阶段</th><th class="nw">目标日期</th><th>内容</th><th>完成判据</th></tr>
+<tr><td>已完成</td><td>2026-09-18</td><td>四工具编排、四层守卫、六条规则、上下文预算三档、核实清单、链路追踪与质量中心、53 条用例 + 263 项单测</td><td>见《验收标准文档》基线数据</td></tr>
+<tr><td>E1</td><td>2026-09-30</td><td>接地校验 shadow → enforce：沉淀误判样本为回归用例</td><td>连续两轮 53 条用例零误伤，方可切档</td></tr>
+<tr><td>E2</td><td>2026-10-15</td><td>规则配置化：条款号、阈值、必备记录项抽到配置文件，规则引擎只留算法</td><td>换一套条款编号只改配置即可通过现有规则单测</td></tr>
+<tr><td>E3</td><td>2026-10-31</td><td>检索 RRF 混合（向量 + BM25）</td><td>37 条检索探针 top4 召回率较 81% 基线提升且无单项回退</td></tr>
+<tr><td>E4</td><td>2026-11-15</td><td>多轮会话与上下文澄清</td><td>代词指代用例集通过；追问不得继承上一轮口径而答到不相干资料</td></tr>
+<tr><td>E5</td><td>按需</td><td>生产化能力：鉴权、并发治理、链路持久化</td><td>仅在部署形态由单机转为多用户服务时启动</td></tr>
+</table>
+
+<footer>
+海上风电机组维检 Agent · 架构设计文档 V1.0 · 2026-09-18 · 与《原型设计文档》《验收标准文档》配套使用
+</footer>
+
+</div>
+</body>
+</html>
