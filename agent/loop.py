@@ -40,6 +40,13 @@ MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "6"))
 MAX_UNGROUNDED_RETRIES = 1
 # 提示词强制的第一个二级标题，用作"最终答案已开始"的分界
 ANSWER_MARKER = "## 结论"
+# 正文被厂商的输出长度上限砍断时，span 摘要上的前缀。
+# 起因是 2026-09-18 探针用例 P8 的一次实测：模型把要点写在「## 结论」之前的铺垫里，
+# 到结论段只写出半句「T03 心跳丢失确实已达到重复故障标准——2026-07-18」就断了。
+# 解析照常成功（标题在）、format_parsed 为 true、「产出可用回答」记满分 —— 一段 22 字
+# 的残句被当成完整答案报上去，只有断言碰巧打在被砍掉的那半边才暴露。停止原因是
+# 厂商给的机器事实，不是措辞判断，不存在误伤，因此直接标注，不走影子档。
+_TRUNCATED_MARK = "⚠ 输出被长度上限截断："
 # qwen3 系列默认开启 thinking，单次调用可达 30 秒，现场演示不可接受。
 # 关闭后靠工具与规则引擎保证正确性，而不是靠模型的内部推理。
 ENABLE_THINKING = os.getenv("ENABLE_THINKING", "false").lower() in {"1", "true", "yes"}
@@ -95,9 +102,11 @@ def _client() -> OpenAI:
 class _Msg:
     """把流式增量拼回成与非流式一致的消息对象，后续逻辑无需分叉。"""
 
-    def __init__(self, content: str, tool_calls: list[Any]) -> None:
+    def __init__(self, content: str, tool_calls: list[Any], *, truncated: bool = False) -> None:
         self.content = content
         self.tool_calls = tool_calls or None
+        # 正文被厂商的输出长度上限砍断 —— 这一段不是完整答案
+        self.truncated = truncated
 
 
 class _Call:
@@ -128,6 +137,7 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
     span = trace.start("MODEL", "Agent 决策", detail=model)
     usage = None
     joined = ""           # 本轮已收到的全部内容，滚动累加（逐块重拼是 O(n²)）
+    finish: str | None = None   # 厂商给的停止原因，"length" 表示正文被砍在半句上
     partial: dict[int, dict[str, str]] = {}
     answer_at = -1        # 正文（「## 结论」）在已收到内容里的起点，-1 表示还没出现
     emitted = 0           # 正文里已经吐给界面的字符数，补发时从这里接着发
@@ -146,6 +156,8 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
                 usage = chunk.usage
             if not chunk.choices:
                 continue
+            # 厂商把「为什么停」放在最后一个分片上，错过就再也问不到了
+            finish = getattr(chunk.choices[0], "finish_reason", None) or finish
             delta = chunk.choices[0].delta
             if delta.content:
                 joined += delta.content
@@ -183,6 +195,7 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
 
     calls = [_Call(v["id"], v["name"], v["arguments"]) for _, v in sorted(partial.items())]
     content = joined
+    truncated = finish == "length"
 
     pt = getattr(usage, "prompt_tokens", 0) or 0
     ct = getattr(usage, "completion_tokens", 0) or 0
@@ -191,7 +204,10 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
     span.close(
         input_summary="prompt %d tok%s" % (pt, "（缓存命中 %d）" % cached if cached else ""),
         output_summary=(("发起 %d 个工具调用：%s" % (len(calls), "、".join(c.function.name for c in calls)))
-                        if calls else (content[:110] + ("…" if len(content) > 110 else ""))),
+                        if calls else (_TRUNCATED_MARK if truncated else "")
+                             + content[:110] + ("…" if len(content) > 110 else "")),
+        status=DEGRADED if truncated else OK,
+        finish_reason=finish if truncated else None,
         input_detail=_request_detail(model, messages),
         output_detail=_detail({
             "content": content,
@@ -211,7 +227,7 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
         # 同样只在这一轮不会被作废时才发——扣住期间宁可晚一点，也不能吐了再撤。
         if streaming or (release_mark and release_mark in content):
             yield {"type": "token", "text": content}
-    yield {"type": "_message", "message": _Msg(content, calls)}
+    yield {"type": "_message", "message": _Msg(content, calls, truncated=truncated)}
 
 
 def _usage_of(model: str, usage: Any) -> dict[str, Any]:
@@ -570,11 +586,20 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
             },
         }) from exc
 
+    # 正文写到一半被厂商的长度上限砍断 —— 取最后一次 MODEL span 的停止原因：
+    # 无论正文出自流式的「答案成文」还是步数用尽后的收口调用，它都是那一次。
+    # 拒答那条路的正文是代码写死的，模型那次写了什么都与最终答案无关，不参与判定。
+    model_spans = [s for s in tr.as_list() if s["kind"] == "MODEL"]
+    answer_truncated = (stop_reason != "refused_ungrounded"
+                        and bool(model_spans)
+                        and model_spans[-1].get("finish_reason") == "length")
+
     yield {"type": "composing", "message": "正在整理结论与依据…"}
     yield {
         "type": "done",
         "result": {
             "draft": draft,
+            "answer_truncated": answer_truncated,
             "trace": trace,
             "evidence": evidence,
             "stop_reason": stop_reason,
@@ -645,6 +670,7 @@ def _closing_call(client: OpenAI, model: str, messages: list[dict[str, Any]], tr
     message = resp.choices[0].message
     content = message.content or ""
     called_tools = bool(getattr(message, "tool_calls", None))
+    truncated = getattr(resp.choices[0], "finish_reason", None) == "length"
     usage = getattr(resp, "usage", None)
     pt = getattr(usage, "prompt_tokens", 0) or 0
     ct = getattr(usage, "completion_tokens", 0) or 0
@@ -654,12 +680,15 @@ def _closing_call(client: OpenAI, model: str, messages: list[dict[str, Any]], tr
     span.close(
         input_summary="prompt %d tok%s" % (pt, "（缓存命中 %d）" % cached if cached else ""),
         output_summary=("收口轮仍发起工具调用且正文为空，已撤下工具重试"
-                        if empty_with_tools else content[:110] + ("…" if len(content) > 110 else "")),
+                        if empty_with_tools
+                        else (_TRUNCATED_MARK if truncated else "")
+                             + content[:110] + ("…" if len(content) > 110 else "")),
         input_detail=_request_detail(model, messages),
         output_detail=_detail({"content": content, "tool_calls": called_tools,
                                "usage": {"prompt_tokens": pt, "completion_tokens": ct,
                                          "cached_tokens": cached}}),
-        status=DEGRADED if empty_with_tools else OK,
+        status=DEGRADED if (empty_with_tools or truncated) else OK,
+        finish_reason="length" if truncated else None,
         prompt_tokens=pt, completion_tokens=ct, cached_tokens=cached,
         cost_cny=round(price_of(model, pt, ct, cached), 6),
     )
