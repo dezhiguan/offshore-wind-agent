@@ -11,8 +11,9 @@ from dotenv import load_dotenv
 
 load_dotenv()  # 必须在导入 agent.loop 之前，否则读不到 .env 里的模型配置
 
-from fastapi import FastAPI  # noqa: E402
-from fastapi.responses import FileResponse, StreamingResponse  # noqa: E402
+from fastapi import FastAPI, Request  # noqa: E402
+from fastapi.exceptions import RequestValidationError  # noqa: E402
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
@@ -33,8 +34,40 @@ app = FastAPI(title="海上风电机组维检 Agent", version="1.0.0")
 app.include_router(admin_router)
 
 
+# 提问长度上限。原型、架构文档与两份测试报告都按这个数写，改它等于改契约；
+# 界面侧同步在 textarea 上挂 maxlength（见 static/index.html）。
+MAX_QUESTION_CHARS = 500
+
+
 class AskRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=500)
+    question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
+
+
+@app.exception_handler(RequestValidationError)
+def _invalid_request(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """把 pydantic 的英文校验错误换成界面能直接展示的中文。
+
+    默认响应是 ``{"detail":[{"type":"string_too_long","msg":"String should have at
+    most 500 characters","input":<整段提问原样回显>}]}``：界面读不出语义，只能统一
+    落到"请求失败……请确认服务仍在运行"，把用户自己输入超长说成了服务故障；
+    input 还会把整段提问回显一遍，日志里平白多存一份。
+
+    状态码仍是 422——安全测试报告里「超长输入被干净拒绝」记的就是这个码，
+    要改的是说法，不是契约。
+    """
+    first = (exc.errors() or [{}])[0]
+    kind = first.get("type")
+    if kind == "string_too_long":
+        got = len(first.get("input") or "")
+        msg = ("提问超出 %d 字上限（本次 %d 字）。请精简后重试；"
+               "问题分成几个小问分别提交，通常比一次问完更快拿到结论。"
+               % (MAX_QUESTION_CHARS, got))
+    elif kind in ("string_too_short", "missing"):
+        msg = "请先输入问题。"
+    else:
+        msg = "提问格式不正确：question 需要是 1~%d 字的文本。" % MAX_QUESTION_CHARS
+    return JSONResponse(status_code=422,
+                        content={"ok": False, "kind": "bad_request", "error": msg})
 
 
 @app.on_event("startup")

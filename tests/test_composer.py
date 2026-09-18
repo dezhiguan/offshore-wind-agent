@@ -287,3 +287,133 @@ def test_meta_filter_keeps_substantive_clause_mention():
              "- 规程第 1.2 条要求现场留痕，本次无记录。\n")
     out = compose("Q", {"draft": draft, "evidence": {}, "trace": []})
     assert out["unverifiable"] == ["规程第 1.2 条要求现场留痕，本次无记录。"]
+
+
+def _run(draft, *, stop_reason="completed", rules=None):
+    return {
+        "draft": draft,
+        "trace": [{"step": 1, "tool": "check_rule", "summary": "ok"}],
+        "evidence": {"tables": [], "docs": [], "rules": rules or []},
+        "stop_reason": stop_reason,
+        "elapsed_ms": 1,
+    }
+
+
+def _sweep(rule):
+    """一次 scope="all" 的判定：coverage.完整 是 sweep 写下的机器事实。"""
+    return {"args": {"rule": rule, "scope": "all"},
+            "result": {"rule": rule, "coverage": {"判定对象总数": 25, "已判定": 25, "完整": True}}}
+
+
+def _per_subject(rule):
+    return {"args": {"rule": rule, "turbine_id": "T03"}, "result": {"rule": rule}}
+
+
+class TestNoneItemNormalization:
+    """「无」写成两行时，两行都逃过了归一化，面板上凭空多出两条待核实项。"""
+
+    def test_none_with_trailing_annotation_line(self):
+        out = compose("q", _run("""## 结论
+T03 有 2 条 WARNING 告警。
+
+## 现有资料无法确认
+无。
+（本次未涉及规程判定，也无遗漏对象。）
+"""))
+        assert out["unverifiable"] == []
+
+    def test_annotation_kept_when_real_items_present(self):
+        # 注解行与真实条目并列时可能是上一条的续行，丢了就是删内容
+        out = compose("q", _run("""## 结论
+结论正文。
+
+## 现有资料无法确认
+- 现场安全条件
+- （母线电压未记录）
+"""))
+        assert len(out["unverifiable"]) == 2
+
+
+class TestSectionRerouting:
+    """「本次未完成」被写进「现有资料无法确认」——重跑就能消的缺口
+    被包装成派人上岛也未必消得掉的缺口。"""
+
+    def test_not_run_item_moves_to_incomplete(self):
+        out = compose("q", _run("""## 结论
+已判 T03。
+
+## 现有资料无法确认
+- WO-260708 关闭过程是否满足第 6.1 条——本轮未完成查询：close_compliance 判定需补查。
+- 现场安全条件（挂牌上锁、验电）——现有资料无法确认，需要现场核实。
+"""))
+        assert len(out["unverifiable"]) == 1
+        assert "现场安全条件" in out["unverifiable"][0]
+        assert any("close_compliance" in i for i in out["incomplete"])
+        assert len(out["meta"]["section_rerouted"]) == 1
+
+    def test_tool_did_not_return_also_moves(self):
+        # 实测形态：判定工具本轮没返回，条目却写在「现有资料无法确认」里。
+        # 工具没返回是重跑就能变的，不是资料里没有。
+        out = compose("q", _run("""## 结论
+已判一部分。
+
+## 现有资料无法确认
+- 第 5.1 条九项前置条件的逐项判定结果——现有资料无法确认（判定工具本轮未能返回）。
+"""))
+        assert out["unverifiable"] == []
+        assert len(out["incomplete"]) == 1
+
+    def test_item_needing_site_check_stays(self):
+        # 两个标记同时命中时不搬：搬走会把现场核实那一半一起带走
+        out = compose("q", _run("""## 结论
+已判 T03。
+
+## 现有资料无法确认
+- 母线电压实际值——本次未查询，且现有资料无法确认，需要现场核实。
+"""))
+        assert len(out["unverifiable"]) == 1
+        assert out["incomplete"] == []
+
+    def test_no_duplicate_when_model_wrote_both_sections(self):
+        line = "全部 COMPLETED 工单的关闭合规性判定——本轮未完成查询，需补查。"
+        out = compose("q", _run("""## 结论
+已判一部分。
+
+## 现有资料无法确认
+- %s
+
+## 本次未完成
+- %s
+""" % (line, line)))
+        assert out["incomplete"].count(line) == 1
+
+
+class TestCoverageIsPerRule:
+    """一条完整 sweep 只证明那一项判定判完了，证明不了整个回答覆盖完整。"""
+
+    def test_complete_sweep_alone_suppresses_notice(self):
+        out = compose("q", _run("""## 结论
+全场 25 个组合已全部判完，仅 T03/24002 构成重复故障。
+""", stop_reason="max_steps", rules=[_sweep("repeat_fault")]))
+        assert "步数用尽" not in out["answer"]
+        assert out["meta"]["coverage_complete"] is True
+        assert out["truncation"] is None
+
+    def test_model_declared_unfinished_beats_one_complete_sweep(self):
+        out = compose("q", _run("""## 结论
+重复故障全场判完；工单合规只判了一部分。
+
+## 本次未完成
+- 四台机组的工单五要素核对——需补查 work_order_assessment。
+""", stop_reason="max_steps",
+            rules=[_sweep("repeat_fault"), _per_subject("work_order_assessment")]))
+        assert "步数用尽" in out["answer"]
+        assert out["meta"]["coverage_complete"] is False
+        assert out["truncation"] is not None
+
+    def test_coverage_rules_accounted_by_rule(self):
+        out = compose("q", _run("""## 结论
+正文。
+""", rules=[_sweep("repeat_fault"), _per_subject("close_compliance")]))
+        assert out["meta"]["coverage_rules"] == {
+            "swept": ["repeat_fault"], "per_subject": ["close_compliance"]}
