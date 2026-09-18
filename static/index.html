@@ -263,6 +263,13 @@ function render(d) {
   // 有结构化清单时优先展示清单——它把「无法确认」从免责声明变成可执行的核实项。
   // 清单只覆盖规程有明文条目的部分，剩余的自由文本说明仍以提示条呈现。
   (d.checklists || []).forEach(c => P.push(checklistCard(c)));
+  // 「本轮没查完」排在「无法确认」前面：先说清楚这一轮是被截断的，
+  // 下面那块才不会被读成「资料里没有」。
+  if (d.truncation) P.push(`<div class="alert err"><h3>本轮未完成查询</h3>
+    <p style="margin:0 0 6px;font-size:13.5px">${md(d.truncation.note)}</p>
+    <p style="margin:0;font-size:13.5px">已执行 ${d.truncation.steps} 步工具调用${
+      d.truncation.unread_sources?.length
+        ? `；本轮未读取：${d.truncation.unread_sources.map(esc).join('、')}` : ''}。</p></div>`);
   if (d.unverifiable?.length) P.push(`<div class="alert"><h3>其他需现场核实的事项</h3><ul>${
     d.unverifiable.map(u => `<li>${md(u)}</li>`).join('')}</ul></div>`);
 

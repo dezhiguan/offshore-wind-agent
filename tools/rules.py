@@ -962,10 +962,65 @@ def _resolve_subject(rule: str, kwargs: dict[str, Any]) -> tuple[dict[str, Any],
     return args, None, None
 
 
+# 一次批量判定的上限。再多不是"判不动"，而是问题本身该先收窄：
+# 九台风机 × 九个故障码的全组合没有业务意义，扫描类问题应当先用 query_db
+# 把候选集筛到"总次数 ≥ 门限"这一档，再把剩下的几组一次判完。
+MAX_SUBJECTS = 12
+
+
+def _check_rule_batch(rule: str, subjects: Any, shared: dict[str, Any]) -> dict[str, Any]:
+    """同一条规则、多个判定对象，一次调用判完。
+
+    起因是一次实测（2026-09-18 边界用例 M2「哪些风机已达重复故障标准但工单还不是
+    HIGH」）：模型对每个风机-故障组合各调一次 check_rule，六步预算在判定上就耗光，
+    `maintenance_records` 一次都没查到，收口时却把工单优先级写进了「现有资料无法
+    确认」—— 把"自己没查"说成了"资料没有"，比漏答更误导。
+
+    根因是工具粒度：判定本身是确定性的、代价极低，贵的是每次判定都要占一个步数。
+    所以这里让一次调用带一串对象，把扫描类问题的步数从 O(组合数) 压回 O(1)。
+
+    条款原文按条款号去重后收在顶层：逐条内联会把同一段规程重复 N 遍，
+    既撑爆上下文预算，也让护栏水位虚高。
+    """
+    if not isinstance(subjects, list) or not subjects:
+        return {"ok": False, "error": "subjects 必须是非空数组，元素形如 "
+                                      "{\"turbine_id\": \"T03\", \"fault_code\": \"24002\"} "
+                                      "或 {\"work_order_id\": \"WO-260703\"}"}
+    if len(subjects) > MAX_SUBJECTS:
+        return {"ok": False, "error": "一次最多判定 %d 个对象，本次传入 %d 个。"
+                                      "请先用 query_db 收窄候选集再判定。"
+                                      % (MAX_SUBJECTS, len(subjects))}
+
+    items: list[dict[str, Any]] = []
+    clause_texts: dict[str, Any] = {}
+    for subject in subjects:
+        if not isinstance(subject, dict):
+            items.append({"subject": subject,
+                          "result": {"ok": False, "error": "subjects 的元素必须是对象"}})
+            continue
+        result = check_rule(rule, **{**shared, **subject})
+        # 原文抽到顶层去重，逐条结果里不再重复携带
+        for clause, text in (result.pop("clause_texts", None) or {}).items():
+            clause_texts.setdefault(clause, text)
+        items.append({"subject": subject, "result": result})
+
+    return {
+        "ok": True,
+        "rule": rule,
+        "batch": True,
+        "count": len(items),
+        "results": items,
+        "clause_texts": clause_texts,
+    }
+
+
 def check_rule(rule: str, **kwargs) -> dict[str, Any]:
     fn = RULES.get(rule)
     if fn is None:
         return {"ok": False, "error": "未知规则 %r，可用：%s" % (rule, "、".join(RULES))}
+    subjects = kwargs.pop("subjects", None)
+    if subjects is not None:
+        return _check_rule_batch(rule, subjects, kwargs)
     try:
         kwargs, locator, early = _resolve_subject(rule, kwargs)
     except RuleInputError as exc:

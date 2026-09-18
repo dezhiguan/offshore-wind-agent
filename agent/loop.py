@@ -222,8 +222,17 @@ def _for_model(result: dict[str, Any]) -> dict[str, Any]:
 
     这条边界原本靠"记得别回写 result"的口头纪律守（见 _collect_evidence 里那段
     注释），加一条就得记一次。改成按前缀剥离，新增审计字段时自动生效。
+
+    批量判定的审计字段藏在 results 里的每一条下面，只剥顶层等于没剥 ——
+    而批量正是"同样的内容乘以对象数"最容易失控的地方。
     """
-    return {k: v for k, v in result.items() if not k.startswith("_audit_")}
+    stripped = {k: v for k, v in result.items() if not k.startswith("_audit_")}
+    if stripped.get("batch"):
+        stripped["results"] = [
+            dict(item, result=_for_model(item.get("result") or {}))
+            for item in stripped.get("results") or []
+        ]
+    return stripped
 
 
 def _detail(obj: Any) -> str:
@@ -271,6 +280,18 @@ def _plain(msg) -> dict[str, Any]:
     return out
 
 
+# 批量判定摘要里数哪个字段、叫什么。各规则的"成立"含义不同（禁止复位成立是坏消息、
+# 关闭合规成立是好消息），所以按规则逐条写明，不用一个笼统的"命中"糊过去。
+# priority_required 的结论是优先级档位不是布尔，故意不在表里，只报对象数。
+_BATCH_FLAG = {
+    "repeat_fault": ("is_repeat_fault", "构成重复故障"),
+    "remote_reset_ban": ("reset_banned", "禁止远程复位"),
+    "close_compliance": ("is_compliant", "关闭合规"),
+    "replace_precondition": ("can_replace_now", "具备立即更换条件"),
+    "work_order_assessment": ("has_work_order", "已有工单"),
+}
+
+
 def _summarize(name: str, result: dict[str, Any]) -> str:
     """给 UI 时间线用的一行摘要。不放全量结果，避免界面被刷屏。"""
     if not result.get("ok", True):
@@ -297,6 +318,17 @@ def _summarize(name: str, result: dict[str, Any]) -> str:
     if name == "get_doc_section":
         return "取回《%s》%s" % (result.get("doc", ""), result.get("title", ""))
     if name == "check_rule":
+        # 批量判定没有单一 verdict：不特判的话时间线上就是一行空白，
+        # 一次判了几个、判出几个成立全看不见。
+        if result.get("batch"):
+            items = result.get("results") or []
+            flag = _BATCH_FLAG.get(result.get("rule") or "")
+            if not flag:
+                return "批量判定 %d 个对象" % len(items)
+            key, label = flag
+            # 只数 True。None 是「资料不足以判定」，混进计数就等于把未知算成否定。
+            hit = sum(1 for i in items if (i.get("result") or {}).get(key) is True)
+            return "批量判定 %d 个对象：%d 个%s" % (len(items), hit, label)
         return str(result.get("verdict", ""))[:80]
     return "完成"
 
@@ -512,8 +544,13 @@ def _force_answer(client: OpenAI, model: str, messages: list[dict[str, Any]], tr
     """
     messages.append({
         "role": "user",
-        "content": "已达到查询步数上限。请基于上面已经取得的证据直接作答；"
-                   "证据不足的部分放进「现有资料无法确认」，不要再调用工具。",
+        "content": "已达到查询步数上限。请基于上面已经取得的证据直接作答，不要再调用工具。"
+                   "证据不足分两种，不要混为一谈："
+                   "①查过、资料里确实没有记录的（如现场安全条件、责任调查结论），"
+                   "放进「现有资料无法确认」；"
+                   "②本轮没来得及查的（如某张表、某个字段还没读过），"
+                   "写成「本轮未完成查询：…（需补查）」，"
+                   "**不得**说成资料里没有或无法确认——那是在把自己没查说成资料没有。",
     })
     content, called_tools = _closing_call(client, model, messages, trace,
                                           "步数用尽收口", with_tools=True)
@@ -610,6 +647,18 @@ def _collect_evidence(evidence, name, args, result) -> None:
             "text": result.get("text"),
         })
     elif name == "check_rule":
+        # 批量判定在证据里摊平成逐条：依据渲染、现场核实清单和数据源汇总都按
+        # 「一条 rules 记录 = 一个判定对象」写的，收成一条会让面板上只剩一个结论。
+        if result.get("batch"):
+            for item in result.get("results", []):
+                one = item.get("result") or {}
+                if not one.get("ok", True):
+                    continue
+                evidence["rules"].append({"rule": args.get("rule"),
+                                          "subject": item.get("subject"), "result": one})
+                for section in cited_sections(one):
+                    _add_doc(evidence, section)
+            return
         evidence["rules"].append({"rule": args.get("rule"), "result": result})
         # 判定引用到的规程条款，原文一并留存：依据面板里点得开、数据源里数得到。
         # 只写 evidence，**不回写 result** —— 调用方随后会把 result 序列化进模型上下文，

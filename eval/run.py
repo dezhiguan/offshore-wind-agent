@@ -4,6 +4,7 @@
     python eval/run.py            # 跑 11 条回归用例
     python eval/run.py Q5 Q7      # 只跑指定用例
     python eval/run.py probes     # 跑探针用例（题面之外的同类问题）
+    python eval/run.py boundary   # 跑边界与能力用例（题面第四、五章）
 
 每条用例的完整产物落到 eval/out/<id>.json，同时充当离线回放（--replay）的素材，
 现场断网时仍能走完整界面流程。
@@ -39,7 +40,7 @@ def main(argv: list[str]) -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     # 第一个参数可以是用例文件名（cases / probes），其余为用例 id
     suite = "cases"
-    if argv and argv[0] in {"cases", "probes", "pressure"}:
+    if argv and argv[0] in {"cases", "probes", "pressure", "boundary"}:
         suite, argv = argv[0], argv[1:]
     wanted = {a.upper() for a in argv} or None
     cases = [c for c in load_cases(suite) if not wanted or c["id"].upper() in wanted]

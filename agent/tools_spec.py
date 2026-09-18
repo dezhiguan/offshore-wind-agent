@@ -133,6 +133,9 @@ TOOLS: list[dict[str, Any]] = [
                 "会返回该规则覆盖的全部条款与原文（结果带 is_general=true），"
                 "比自己用 search_docs 找条款更全、也不会漏。"
                 "反过来，问题指向具体对象时必须带上 id，通则不能替代对具体工单的判定。"
+                "**需要对多个对象做同一判定时（如全场扫描哪些组合构成重复故障、"
+                "哪些工单该升优先级），把它们放进 subjects 一次判完，禁止逐个调用**："
+                "逐个调用会把查询步数耗在判定上，后续该查的表就查不成了。"
             ),
             "parameters": {
                 "type": "object",
@@ -145,6 +148,23 @@ TOOLS: list[dict[str, Any]] = [
                     "turbine_id": {"type": "string", "description": "风机编号，如 T03。"},
                     "fault_code": {"type": "string", "description": "裸故障代码，如 24002。"},
                     "work_order_id": {"type": "string", "description": "工单编号，如 WO-260708。"},
+                    "subjects": {
+                        "type": "array",
+                        "description": (
+                            "可选。批量判定对象，元素形如 {\"turbine_id\":\"T03\",\"fault_code\":\"24002\"} "
+                            "或 {\"work_order_id\":\"WO-260703\"}，一次最多 12 个。"
+                            "传了本参数就按批量判定，逐个对象各出一条结论；"
+                            "窗口等其余参数对所有对象共用。"
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "turbine_id": {"type": "string"},
+                                "fault_code": {"type": "string"},
+                                "work_order_id": {"type": "string"},
+                            },
+                        },
+                    },
                     "window_start": {"type": "string", "description": "可选。考察窗口起点，'YYYY-MM-DD HH:MM:SS'，闭区间。"},
                     "window_end": {"type": "string", "description": "可选。考察窗口终点，'YYYY-MM-DD HH:MM:SS'，闭区间。"},
                 },
