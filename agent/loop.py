@@ -106,8 +106,13 @@ class _Call:
         self.function = type("F", (), {"name": name, "arguments": arguments})()
 
 
-def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Trace):
+def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Trace,
+          *, stream_answer: bool = True):
     """发起一次流式调用。
+
+    `stream_answer=False` 时本轮正文只累计、不逐字吐给界面。用在还没取到任何证据的
+    那几轮上：那时候写出来的东西随时可能被「未取证拦截」整段作废，先吐后撤等于让
+    用户看着一段完整答案被换掉（见 run_agent_stream 里 streamed 的说明）。
 
     实测（见 设计说明 第 3.14 节）：一次多步问答里 69% 的耗时花在最后一次「写答案」上——
     1402 个字符按约 94 字符/秒生成，就是 13 秒。决策调用反而很快（2~3 秒）。
@@ -141,13 +146,15 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
                 # 那些不是答案，若照发给界面，会出现"冒出几个字又被冲掉"的闪烁。
                 # 以提示词强制的三段标题为界：见到「## 结论」才算进入最终答案。
                 if answering:
-                    yield {"type": "token", "text": delta.content}
+                    if stream_answer:
+                        yield {"type": "token", "text": delta.content}
                 else:
                     joined = "".join(content_parts)
                     at = joined.find(ANSWER_MARKER)
                     if at >= 0:
                         answering = True
-                        yield {"type": "token", "text": joined[at:]}
+                        if stream_answer:
+                            yield {"type": "token", "text": joined[at:]}
             for tc in (delta.tool_calls or []):
                 slot = partial.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
                 if tc.id:
@@ -190,10 +197,13 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
     )
     if calls and answering:
         # 极少见：同一轮里既出现了标题又发起了工具调用。已渲染的不是最终答案，要撤掉。
-        yield {"type": "answer_reset"}
+        # 没往界面吐过字就没什么可撤的，别发空指令让前端白闪一下。
+        if stream_answer:
+            yield {"type": "answer_reset"}
     elif not calls and not answering and content.strip():
         # 模型没按三段格式输出时的兜底：一次性给出，不让界面空着
-        yield {"type": "token", "text": content}
+        if stream_answer:
+            yield {"type": "token", "text": content}
     yield {"type": "_message", "message": _Msg(content, calls)}
 
 
@@ -385,6 +395,10 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
     stop_reason = "completed"
 
     ungrounded_retries = 0
+    # 界面上此刻是否挂着一段还没定稿的正文。只要这段会被后面的分支作废
+    # （未取证打回、拒答、步数用尽重写），就必须先发 answer_reset 把它撤掉，
+    # 否则新正文会直接续写在旧正文后面——线上实测一次提问被写成了两份答案。
+    streamed = False
 
     yield {"type": "thinking", "message": "正在判断需要查询哪些资料…"}
 
@@ -392,11 +406,17 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
     try:
         for _step in range(MAX_STEPS):
             msg = None
-            for event in _call(client, model, messages, tr):
+            # 一条证据都还没取到时，这一轮写出来的正文随时可能被下面的未取证拦截
+            # 整段作废，所以只累计不外发。取到证据之后拦截不会再触发，正文照常逐字流。
+            for event in _call(client, model, messages, tr, stream_answer=bool(trace)):
                 if event["type"] == "_message":
                     msg = event["message"]
-                else:
-                    yield event
+                    continue
+                if event["type"] == "token":
+                    streamed = True
+                elif event["type"] == "answer_reset":
+                    streamed = False
+                yield event
 
             if not msg.tool_calls:
                 # 一次工具都没调就想作答 —— 踩红线，打回
@@ -404,6 +424,13 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
                     ungrounded_retries += 1
                     tr.record("GUARD", "未取证拦截", status=DEGRADED,
                               output_summary="模型未调用任何工具即试图作答，已打回要求先检索")
+                    if streamed:
+                        yield {"type": "answer_reset"}
+                        streamed = False
+                    # 打回意味着要重跑一整轮模型调用，界面上会静默好几秒。
+                    # 不说一声的话，用户看到的是计时器在跳而什么都没发生。
+                    yield {"type": "thinking",
+                           "message": "这一轮没有检索任何资料，已打回要求先取证…"}
                     messages.append(_plain(msg))
                     messages.append({
                         "role": "user",
@@ -414,6 +441,9 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
                 if not trace:
                     tr.record("GUARD", "未取证拦截", status=ERROR,
                               output_summary="二次仍未检索，拒绝作答而非放行无依据回答")
+                    if streamed:
+                        yield {"type": "answer_reset"}
+                        streamed = False
                     stop_reason = "refused_ungrounded"
                     draft = ("## 结论\n无法回答：本系统要求所有结论必须有随题资料支撑，"
                              "本次未能检索到任何可用依据。\n\n## 依据\n（无）\n\n"
@@ -490,6 +520,10 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
                 })
         else:
             stop_reason = "max_steps"
+            # 收口会重新生成一份正文，界面上半截的那份不能留着让它续写
+            if streamed:
+                yield {"type": "answer_reset"}
+                streamed = False
             draft = _force_answer(client, model, messages, tr)
     except Exception as exc:
         raise AgentRunFailed(exc, {
