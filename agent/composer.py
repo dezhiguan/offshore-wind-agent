@@ -104,6 +104,13 @@ _TRUNCATION_NOTICE = (
     "> ⚠ 本次因查询步数用尽提前收口，下列结论**可能未覆盖全部对象**，"
     "不要当作全场完整名单。\n\n")
 
+# 正文被模型的输出长度上限砍断。与上面那条是两回事：那条说「没查完」，
+# 这条说「话没说完」—— 三段标题解析照常成功，残句照样是一段正文，
+# 不标出来就会以完整答案的样子呈现（2026-09-18 P8 实测：结论段只剩半句 22 个字）。
+# 措辞里刻意不含「步数用尽」等字样：那是另一件事，也会撞上用例的否定断言。
+_LENGTH_NOTICE = (
+    "> ⚠ 本次回答被模型的输出长度上限截断，下列结论**不完整**，请重跑本问题。\n\n")
+
 # 数据源统一用这四个 key 表示；回归用例的 sources: 字段写的也是它们。
 SOURCE_LABELS = {
     "alarm_records": "运行告警记录（alarm_records）",
@@ -540,6 +547,13 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
             incomplete = ["本次因查询步数用尽提前收口，未能逐一判定全部对象；"
                           "重跑本问题或缩小范围（指定风机 / 工单）可得到完整结论。"]
 
+    # 截断是厂商给的机器事实（finish_reason=length），与措辞判定不同，不走影子档
+    answer_truncated = bool(run.get("answer_truncated"))
+    if answer_truncated:
+        answer = _LENGTH_NOTICE + answer
+        incomplete = incomplete + ["本次回答被模型的输出长度上限截断在半句上，"
+                                   "结论未写完；重跑本问题即可得到完整结论。"]
+
     gaps = enumeration_gap(answer, evidence)
     if gaps and guard == "enforce":
         answer += "\n\n> ⚠ 取数结果中有 %s 未在上文列出。" % "；".join(
@@ -582,6 +596,8 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
             "unverifiable_inconsistent": unverifiable_inconsistent,
             # 步数用尽收口 —— 结论的覆盖面存疑，后台按它筛链路
             "truncated": truncated,
+            # 正文被输出长度上限砍断 —— 结论本身残缺，与 truncated（没查完）分开记
+            "answer_truncated": answer_truncated,
             # 证据里有没有一条覆盖全部对象的判定 —— 决定 truncated 要不要提示用户
             "coverage_complete": coverage_complete,
             # 按 rule 记的覆盖面：哪几项判定是全场 sweep 跑的，哪几项是逐对象跑的。
