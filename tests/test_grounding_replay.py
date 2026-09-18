@@ -42,6 +42,63 @@ class TestGrounding:
         assert out["unverifiable"] and "999" in out["unverifiable"][0]
 
 
+class TestSupportSurface:
+    """比对面 = 证据 + 轨迹摘要 + 问句。
+
+    首版只拿 evidence 比，34 条对抗用例标记 8 条、几乎全是误报，来源就这两类。
+    压不下误报率，enforce 档就永远不能开——那这层判定等于装饰。
+    """
+
+    def test_numbers_from_the_question_are_not_the_models_invention(self):
+        """问「IEC 61400-3 的力矩标准」，61400 是用户写的，不是模型编的。"""
+        answer = "按 IEC 61400-3 无法回答，随题资料未收录该标准。"
+        assert grounding.check(answer, EVIDENCE)["flagged"], "不带问句时会误报"
+        r = grounding.check(answer, EVIDENCE, question="按 IEC 61400-3 的预紧力矩是多少？")
+        assert r["flagged"] == []
+
+    def test_number_seen_only_in_the_trace_summary_counts_as_grounded(self):
+        """工具执行结果只进了轨迹摘要时，据它作答不算编造。
+
+        取行数而不是条款号：条款号如今由目录兜底（见
+        test_catalog_backed_enumeration_is_grounded），验不出轨迹这一面。
+        """
+        answer = "该条件下命中 37 行。"
+        assert grounding.check(answer, EVIDENCE)["flagged"], "不带轨迹时会误报"
+        trace = [{"tool": "query_db", "summary": "命中 37 行"}]
+        assert grounding.check(answer, EVIDENCE, trace=trace)["flagged"] == []
+
+    def test_fabricated_number_still_flagged_with_full_surface(self):
+        """放宽比对面不等于放水：问句和轨迹里都没有的数照样标出来。
+
+        取 37 而不是 16：后者恰好等于证据里 24 − 8，会被既有的差额派生豁免掉，
+        那验的就不是本条改动了。
+        """
+        r = grounding.check("工单共 37 张。", EVIDENCE,
+                            question="全场有多少张工单？",
+                            trace=[{"tool": "query_db", "summary": "命中 4 行"}])
+        assert [f["value"] for f in r["flagged"]] == ["37"]
+
+    def test_question_numbers_do_not_feed_the_derived_pass(self):
+        """派生只在真证据里算：否则问句带两个数就能洗白任意第三个数。"""
+        r = grounding.check("缺口 900 分钟。", EVIDENCE, question="1000 和 100 差多少？")
+        assert [f["value"] for f in r["flagged"]] == ["900"]
+        assert r["derived"] == []
+
+    def test_catalog_backed_enumeration_is_grounded(self):
+        """目录是注进提示词的确定性事实，照它作答不该被判"没有支撑"。
+
+        不收进比对面的话，「手册只收录这 9 个故障码」这种**正确**回答会一次挨 9 刀。
+        """
+        answer = "手册只收录 24001、24002、24005、24006、24010、24011、24012、24013、24014。"
+        assert grounding.check(answer, {})["flagged"] == []
+
+    def test_apply_passes_question_and_trace_through(self, monkeypatch):
+        monkeypatch.setattr(grounding, "MODE", "shadow")
+        out = grounding.apply({"answer": "按 IEC 61400-3 无法回答。", "evidence": EVIDENCE,
+                               "question": "IEC 61400-3 怎么规定的？", "trace": []})
+        assert out["meta"]["grounding"]["flagged"] == []
+
+
 class TestReplay:
     def test_disabled_by_default(self, monkeypatch):
         monkeypatch.delenv("REPLAY_MODE", raising=False)

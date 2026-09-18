@@ -6,11 +6,17 @@
 
   L1  连接层：URI 以 mode=ro 打开，SQLite 引擎层面拒绝写
   L2  会话层：PRAGMA query_only = ON
-  L3  授权层：set_authorizer 白名单，只放行 SELECT / READ / FUNCTION 类操作
+  L3  授权层：set_authorizer 白名单，只放行 SELECT / READ / FUNCTION 类操作，
+      并且**限定可读对象**：只有两张业务表放行
   L4  语句层：单语句 + SELECT/WITH 开头 + 关键字黑名单（同时负责给出可读的报错）
 
 L4 放在最后，是因为正则是最弱的一环——它的主要价值是产生一句模型看得懂的
 错误信息以便重写，而不是充当安全边界。
+
+L3 的读对象限制是 2026-09-18 对抗性测试补的：此前四层拦的全是**写**，没有一层
+限制**读什么**。实测 `SELECT name, sql FROM sqlite_master` 与 UNION 拼接均放行，
+换个中性问法模型就会把建表语句原样吐出来——挡住它的是模型的判断，不是工具的边界。
+本项目 schema 本就写在提示词里，直接危害有限，但这是一条通用的元数据外泄通道。
 """
 from __future__ import annotations
 
@@ -33,6 +39,15 @@ _FORBIDDEN = {
     "REINDEX": "重建索引", "PRAGMA": "修改会话设置",
 }
 
+# 可读对象白名单：只有这两张业务表。SQLite 的内部表（sqlite_master 等）
+# 以及未来误建的任何表都不在其列。
+ALLOWED_TABLES = {"alarm_records", "maintenance_records"}
+
+# L4 用：命中即拒并给一句可读的原因。正则挡不住变形写法（那是 L3 的活），
+# 它的价值是让模型看懂自己错在哪、据此重写，而不是充当边界。
+_INTERNAL_OBJECT = re.compile(
+    r"\bsqlite_(?:master|schema|temp_master|temp_schema|sequence|stat\d+)\b|\bpragma_\w+", re.I)
+
 # L3 授权白名单
 _ALLOWED_ACTIONS = {
     getattr(sqlite3, name)
@@ -45,8 +60,18 @@ class SqlGuardError(Exception):
     """语句未通过守卫。消息会原样回灌给模型，用于重写重试。"""
 
 
-def _authorizer(action: int, *_args) -> int:
-    return sqlite3.SQLITE_OK if action in _ALLOWED_ACTIONS else sqlite3.SQLITE_DENY
+def _authorizer(action: int, arg1: str | None = None, *_args) -> int:
+    """动作白名单 + 读对象白名单。
+
+    SQLITE_READ 的 arg1 是表名、arg2 是列名。只放行两张业务表，
+    因此 `sqlite_master`、`pragma_*` 这类元数据读在引擎层就被拒，
+    无论它藏在子查询、UNION 还是 CTE 里——正则看不见的地方这一层看得见。
+    """
+    if action not in _ALLOWED_ACTIONS:
+        return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_READ and arg1 and arg1.lower() not in ALLOWED_TABLES:
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
 
 
 def _strip_comments(sql: str) -> str:
@@ -78,6 +103,13 @@ def check_sql(sql: str) -> str:
             raise SqlGuardError(
                 "数据库为只读题目资料，禁止 %s 操作（检测到关键字 %s）。" % (cn, kw)
             )
+
+    hit = _INTERNAL_OBJECT.search(body)
+    if hit:
+        raise SqlGuardError(
+            "只能查询业务表 %s，不能访问数据库内部元数据（检测到 %s）。"
+            % ("、".join(sorted(ALLOWED_TABLES)), hit.group(0))
+        )
 
     # 无 LIMIT 时补一个，避免一次拉回整表
     if not re.search(r"\bLIMIT\b", upper):

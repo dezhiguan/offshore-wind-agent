@@ -6,6 +6,16 @@
 上来就拦会把正确答案也拦掉。
 
 三档：off / shadow（默认）/ enforce
+
+**证据面的口径**（2026-09-18 对抗性测试后放宽）：首版只拿 evidence 比对，34 条
+对抗用例标记 9 条，逐条核对几乎全是误报，来源就两类——
+
+  1. 问句里带进来的数字（问「IEC 61400-3 的力矩标准」，61400 被当成模型编的）；
+  2. 只出现在检索摘要里的条款号（search_docs 命中了「第 5.1 条 作业前置条件」但
+     没取全文，回答引用 5.1 属实，evidence 里却没有这一节）。
+
+两类都不是"模型编的"，而是"证据面画小了"。现在比对面 = 证据 + 执行轨迹摘要 + 问句原文。
+这是切 enforce 的前置条件：误报率压不下去，enforce 会把正确答案一起拦掉。
 """
 from __future__ import annotations
 
@@ -13,6 +23,8 @@ import json
 import os
 import re
 from typing import Any
+
+from tools.retriever import catalog
 
 MODE = os.getenv("GROUNDING_MODE", "shadow").lower()
 
@@ -62,13 +74,31 @@ def _diffs(blob: str) -> dict[str, str]:
     return out
 
 
-def check(answer: str, evidence: dict[str, Any]) -> dict[str, Any]:
+def _support_blob(evidence: dict[str, Any], question: str,
+                  trace: list[dict[str, Any]] | None) -> str:
+    """可作为支撑的全部文本 = 证据 + 执行轨迹摘要 + 问句原文 + 资料目录。
+
+    轨迹摘要要算进来：search_docs 只返回摘要时，命中章节的标题（含条款号）只在
+    摘要里，"没取回全文"不等于"没检索到这一节"。
+    问句要算进来：用户自己写进问题的数字不是模型编的。
+    目录要算进来：它是注进系统提示词的确定性事实，模型答"手册只收录这 9 个故障码"
+    引的就是它——不收进来，每个照目录作答的正确回答都要挨一刀。
+    """
+    parts = [_evidence_blob(evidence), question or "", catalog()]
+    for entry in trace or []:
+        parts.append(json.dumps(entry, ensure_ascii=False, default=str))
+    return "\n".join(parts)
+
+
+def check(answer: str, evidence: dict[str, Any], question: str = "",
+          trace: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     if MODE == "off" or not answer:
         return {"mode": "off", "flagged": [], "derived": []}
 
-    blob = _evidence_blob(evidence)
+    blob = _support_blob(evidence, question, trace)
     flagged, derived = [], []
-    diffs = _diffs(blob)
+    # 派生仍只在**真证据**里算：拿问句里的数字凑差额，等于给编造的数开一条洗白通道
+    diffs = _diffs(_evidence_blob(evidence))
 
     for num in set(_NUM.findall(answer)) - _WHITELIST:
         if num in blob:
@@ -90,7 +120,8 @@ def check(answer: str, evidence: dict[str, Any]) -> dict[str, Any]:
 
 def apply(result: dict[str, Any]) -> dict[str, Any]:
     """把校验结果挂到 meta 上。shadow 档只记录，不改回答。"""
-    report = check(result.get("answer", ""), result.get("evidence", {}))
+    report = check(result.get("answer", ""), result.get("evidence", {}),
+                   question=result.get("question", ""), trace=result.get("trace"))
     result.setdefault("meta", {})["grounding"] = report
     # 只有 flagged 参与拦截；derived 是"算出来的"，仅留痕供审计
     if report["mode"] == "enforce" and report["flagged"]:

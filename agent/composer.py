@@ -92,6 +92,13 @@ _NONE_ITEM = re.compile(r"^(?:无|none|n/?a|不适用|-|—)\s*(?:[（(].*[)）]
 _META_ITEM = re.compile(r"第\s*1\.2\s*条.*措辞|措辞.*第\s*1\.2\s*条")
 
 
+# 结论段里出现这些措辞，说明模型确实认定有事项无法确认。若此时「现有资料无法确认」
+# 段是空的，两处就自相矛盾：界面那块面板读的是第二段，会显示为空，
+# 等于把模型自己说出来的缺口藏了起来。实测 S3 就是这个形状——正文列了 7 项，
+# 第二段写「无」。这里只**标记**不回填：回填要从自由文本里切句子，切错比空着更糟。
+_UNVERIFIABLE_HINT = re.compile(r"现有资料无法确认|需要现场核实|无法确认|资料中?均?无记录")
+
+
 def _is_none_item(items: list[str]) -> bool:
     return len(items) == 1 and bool(_NONE_ITEM.match(items[0].strip()))
 
@@ -293,6 +300,11 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
     if _is_none_item(unverifiable):
         unverifiable = []
 
+    # 两段式一致性：结论里说了"无法确认"，第二段却是空的
+    conclusion = parts.get(H_CONCLUSION, "")
+    unverifiable_inconsistent = bool(
+        not unverifiable and conclusion and _UNVERIFIABLE_HINT.search(conclusion))
+
     evidence = run.get("evidence", {})
     # 依据由代码从证据渲染。渲染不出东西时（未取证拒答、或复放 2026-09-18 之前的
     # 老链路）才回落到模型写的那一段——回落也要有东西可回落，不能整段空掉。
@@ -316,6 +328,8 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
             "steps": len(run.get("trace", [])),
             # 三段标题没解析出来时降级为原文，同时把降级标出来，不假装成功
             "format_parsed": bool(parts),
+            # 结论里写了"无法确认"、第二段却空着 —— 面板会是空的，与正文矛盾
+            "unverifiable_inconsistent": unverifiable_inconsistent,
             # 本次会话实际进入上下文的语料占比，供界面展示与事后审计
             "budget": run.get("budget"),
             "model": run.get("model"),

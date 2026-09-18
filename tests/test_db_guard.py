@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""只读守卫测试：证明四层防护确实挡得住写操作。"""
+"""只读守卫测试：证明四层防护挡得住写操作，且限定了可读对象。"""
 import sqlite3
 
 import pytest
 
-from tools.db import DB_PATH, DEFAULT_LIMIT, SqlGuardError, check_sql, query_db
+from tools.db import (DB_PATH, DEFAULT_LIMIT, SqlGuardError, _authorizer, check_sql,
+                      query_db)
 
 
 class TestGuardRejectsWrites:
@@ -85,3 +86,38 @@ class TestErrorFeedback:
     def test_empty_sql(self):
         with pytest.raises(SqlGuardError):
             check_sql("   ")
+
+
+class TestReadObjectWhitelist:
+    """四层防护此前拦的全是**写**，没有一层限制**读什么**。
+
+    对抗性测试实测：`SELECT name, sql FROM sqlite_master` 放行，换个中性问法
+    模型就把建表语句原样吐出来——挡住它的是模型的判断，不是工具的边界。
+    """
+
+    @pytest.mark.parametrize("sql", [
+        "SELECT name, sql FROM sqlite_master",
+        "select NAME from SQLITE_MASTER",
+        "SELECT 1 FROM alarm_records UNION SELECT length(sql) FROM sqlite_master",
+        "SELECT turbine_id FROM alarm_records WHERE turbine_id IN (SELECT name FROM sqlite_master)",
+        "SELECT * FROM pragma_table_info('alarm_records')",
+    ])
+    def test_internal_objects_rejected(self, sql):
+        result = query_db(sql)
+        assert result["ok"] is False
+        assert "内部元数据" in result["error"]
+
+    def test_authorizer_denies_even_when_the_regex_misses(self):
+        """L4 正则是最弱的一环，边界由 L3 守：读对象不在白名单一律拒。"""
+        assert _authorizer(sqlite3.SQLITE_READ, "sqlite_master", "name") == sqlite3.SQLITE_DENY
+        assert _authorizer(sqlite3.SQLITE_READ, "alarm_records", "turbine_id") == sqlite3.SQLITE_OK
+
+    @pytest.mark.parametrize("sql", [
+        "SELECT COUNT(*) AS n FROM alarm_records",
+        "SELECT turbine_id, COUNT(*) c FROM alarm_records GROUP BY turbine_id",
+        "WITH x AS (SELECT * FROM maintenance_records WHERE status='COMPLETED') SELECT COUNT(*) FROM x",
+        ("SELECT a.turbine_id, m.work_order_id FROM alarm_records a "
+         "JOIN maintenance_records m ON a.turbine_id=m.turbine_id AND a.fault_code=m.fault_code"),
+    ])
+    def test_business_queries_unaffected(self, sql):
+        assert query_db(sql)["ok"] is True
