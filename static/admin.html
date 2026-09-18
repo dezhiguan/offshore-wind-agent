@@ -824,12 +824,26 @@ async function loadOnline() {
                        s.grounding_mode === 'shadow' ? ' —— 影子档只标注，未改动回答' : ''}`
                    : '未开启校验，本档无数据',
                  s.grounding_checked ? grade(100 - (s.grounding_flagged_rate ?? 0), 90, 75) : '')}
+        ${metric('列举缺口', s.coverage_guard ? s.coverage_guard.toUpperCase() : 'OFF',
+                 s.coverage_gap_rate, '%',
+                 s.coverage_checked
+                   ? `${s.coverage_gap_traces} / ${s.coverage_checked} 次回答少列了取数里已有的对象（共 ${
+                       s.coverage_gap_objects} 个）${
+                       s.coverage_universal_traces ? `；${s.coverage_universal_traces} 次下了全称结论` : ''}${
+                       s.coverage_guard === 'shadow' ? ' —— 影子档只标注，未改动回答' : ''}`
+                   : '未开启判据，本档无数据',
+                 s.coverage_checked ? grade(100 - (s.coverage_gap_rate ?? 0), 95, 85) : '')}
       </div>
-      <p class="note">线上拿不到标准答案，判不出"答得对不对"。这四项是能确认的部分：
+      <p class="note">线上拿不到标准答案，判不出"答得对不对"。这五项是能确认的部分：
         <b>答没答</b>、<b>该不答时有没有停住</b>、<b>没把握时有没有自己标出来</b>、
         <b>标出来的之外有没有编</b>。前三项都以模型自己的输出为准——它不写那一段，占比就是 0，
         不等于没有存疑；第四项是代码逐个核对回答里的数字与条款号在不在本次证据里，
-        与模型怎么说无关。要判对错请到「离线评测」，那里有断言。${
+        与模型怎么说无关。第五项同样是代码核对：取数结果里出现过的对象，正文有没有逐个列到——
+        「其余均无问题」这种漏是静默的，读的人没有第二份名单可对。要判对错请到「离线评测」，
+        那里有断言。${
+          s.section_rerouted_items ? `<br>另有 <b>${s.section_rerouted_items}</b> 条
+            （${s.section_rerouted_traces} 次链路）原被写进「现有资料无法确认」、
+            经判据识别为「本次未完成」后已归位：前者要派人上岛，后者重跑即可，混在一起读的人分不出。` : ''}${
           s.format_fallback ? `<br>另有 <b>${s.format_fallback}</b> 次三段格式未解析出来，
             回答回落为整段原文：这几条的「自报存疑」拆不出来，占比是偏低的。` : ''}</p>
     </section>

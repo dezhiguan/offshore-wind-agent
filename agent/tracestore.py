@@ -51,6 +51,9 @@ def _diagnose(spans: list[dict[str, Any]], meta: dict[str, Any]) -> tuple[str, l
                               "「依据」与「现有资料无法确认」未能拆分"})
     if stop == "max_steps":
         notes.append({"kind": "步数上限", "text": "已达工具调用步数上限，回答基于当时已取得的证据"})
+    # 覆盖面影子信号（列举缺口 / 全称结论）**不进 notes**：notes 非空即判 DEGRADED，
+    # 那会让一个只标注不改答案的影子判据去驱动线上成功率——shadow 的定义就破了。
+    # 它们走 stats 的独立指标与链路详情字段，看得见但不改判任何链路的状态。
     elif stop == "refused_ungrounded":
         notes.append({"kind": "未取证拒答", "text": "两次均未调用任何工具，已拒绝作答而非放行无依据回答"})
 
@@ -110,6 +113,19 @@ def record(question: str, result: dict[str, Any], *, source: str = "online",
             # 接地校验（shadow 档只标注、不改回答）。不留存的话影子跑等于白跑：
             # 判定层要先标定再切 enforce，而标定靠的就是这批结果。
             "grounding": meta.get("grounding") or {},
+            # 覆盖面影子档同理：universal_claim / enumeration_gap / coverage_rules
+            # 原先只写进响应体的 meta，落地时被丢掉——全站没有任何读取点，
+            # 于是"先影子跑标定再切 enforce"这条路径从来就没有过数据。
+            "coverage": {
+                "guard": meta.get("coverage_guard"),
+                "complete": meta.get("coverage_complete"),
+                "rules": meta.get("coverage_rules") or {},
+                "universal_claim": meta.get("universal_claim"),
+                "enumeration_gap": meta.get("enumeration_gap") or {},
+            },
+            # 串段归位的留痕：判据误伤与否要靠这批条目复核
+            "section_rerouted": meta.get("section_rerouted") or [],
+            "incomplete": result.get("incomplete") or [],
             # 三段标题解析成功与否，决定上面两个回答类指标该不该被照字面读
             "format_parsed": meta.get("format_parsed"),
             "budget": meta.get("budget") or {},
@@ -212,6 +228,20 @@ def stats(source: str | None = None) -> dict[str, Any]:
     g_flagged = sum(1 for t in checked if t["grounding"].get("flagged"))
     g_modes = sorted({(t.get("grounding") or {}).get("mode") for t in items
                       if (t.get("grounding") or {}).get("mode")})
+    # 覆盖面影子档：正文该列全却没列全（列举缺口）、以及下了全称结论的链路。
+    # 与接地校验同一套口径——off 档不进分母，否则关掉判据会让"零缺口"看着像质量变好。
+    cov_checked = [t for t in items
+                   if (t.get("coverage") or {}).get("guard") in ("shadow", "enforce")]
+    gap_traces = sum(1 for t in cov_checked if (t["coverage"].get("enumeration_gap") or {}))
+    gap_objects = sum(len(g.get("未提到") or [])
+                      for t in cov_checked
+                      for g in (t["coverage"].get("enumeration_gap") or {}).values())
+    universal_traces = sum(1 for t in cov_checked if t["coverage"].get("universal_claim"))
+    cov_modes = sorted({(t.get("coverage") or {}).get("guard") for t in items
+                        if (t.get("coverage") or {}).get("guard")})
+    # 串段归位：判据搬了多少条。误伤要靠逐条复核，这里先给出量。
+    rerouted_items = sum(len(t.get("section_rerouted") or []) for t in items)
+    rerouted_traces = sum(1 for t in items if t.get("section_rerouted"))
     # 三段格式没解析出来的链路：回答类指标要照这个数打折看
     format_fallback = sum(1 for t in items if t.get("format_parsed") is False)
     return {
@@ -250,6 +280,14 @@ def stats(source: str | None = None) -> dict[str, Any]:
         "grounding_flagged_traces": g_flagged,
         "grounding_flagged_rate": round(g_flagged / len(checked) * 100, 1) if checked else None,
         "grounding_flagged_items": sum(len(t["grounding"].get("flagged") or []) for t in checked),
+        "coverage_guard": "、".join(cov_modes) if cov_modes else None,
+        "coverage_checked": len(cov_checked),
+        "coverage_gap_traces": gap_traces,
+        "coverage_gap_rate": round(gap_traces / len(cov_checked) * 100, 1) if cov_checked else None,
+        "coverage_gap_objects": gap_objects,
+        "coverage_universal_traces": universal_traces,
+        "section_rerouted_items": rerouted_items,
+        "section_rerouted_traces": rerouted_traces,
         "format_fallback": format_fallback,
         # 延迟的样本数与链路条数不一定相等：没测到耗时的那些进不了分位数
         "latency_samples": len(lat),

@@ -62,19 +62,42 @@ _UNIVERSAL = re.compile(
     r"没有一[台个张条项]|无一[台个张条项]|没有任何一[台个张条项]"
     r"|(?:全场|全部|所有|九台|各台)[^。；\n]{0,15}(?:均不|都不|全都不|均未|都未)")
 
-def _has_complete_sweep(evidence: dict[str, Any]) -> bool:
-    """本次是否已有一条「覆盖全部对象」的判定。
+def _rule_name(item: Any) -> str | None:
+    result = item.get("result") if isinstance(item, dict) else None
+    if not isinstance(result, dict):
+        return None
+    return result.get("rule") or (item.get("args") or {}).get("rule")
+
+
+def swept_rules(evidence: dict[str, Any]) -> list[str]:
+    """本次有哪几条判定是「覆盖全部对象」跑完的。
 
     只看 stop_reason 判不了覆盖面。实测：scope="all" 一次就把 25 个组合判完了，
     模型拿到完整名单后又去查工单、查手册、判优先级，照样把 6 轮步数用光——
     这时挂「可能未覆盖全部对象」的提示是误报，名单本身是全的。
     coverage.完整 是 sweep 写下的机器事实，用它来分辨「没判完」和「判完了还在查别的」。
+
+    **按 rule 记账，不再是一个布尔**（2026-09-18 改）：原先任一条 sweep 完整就
+    整体判「覆盖完整」，多指标问题上这是错的——覆盖面是每项判定各自的属性。
     """
+    out: list[str] = []
     for item in evidence.get("rules") or []:
         result = item.get("result") if isinstance(item, dict) else None
         if isinstance(result, dict) and (result.get("coverage") or {}).get("完整"):
-            return True
-    return False
+            name = _rule_name(item)
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
+def judged_rules(evidence: dict[str, Any]) -> list[str]:
+    """本次实际跑过的全部判定，不论覆盖面。与 swept_rules 的差集即逐对象判的那些。"""
+    out: list[str] = []
+    for item in evidence.get("rules") or []:
+        name = _rule_name(item)
+        if name and name not in out:
+            out.append(name)
+    return out
 
 
 _TRUNCATION_NOTICE = (
@@ -141,9 +164,56 @@ _META_ITEM = re.compile(r"第\s*1\.2\s*条.*措辞|措辞.*第\s*1\.2\s*条")
 # 第二段写「无」。这里只**标记**不回填：回填要从自由文本里切句子，切错比空着更糟。
 _UNVERIFIABLE_HINT = re.compile(r"现有资料无法确认|需要现场核实|无法确认|资料中?均?无记录")
 
+# 「本次未完成」被写进「现有资料无法确认」的形状。两段的分界在 H_INCOMPLETE 那段
+# 注释里写得很清楚，提示词里也写了，模型仍然串——2026-09-18 的 25 条真实链路里
+# 4 条串了，形态一致：条目自己明说「本轮未完成查询 / 本次未查询 / 需补查」，
+# 却挂在「其他需现场核实的事项」面板下。
+# 后果不对称：重跑就能消的缺口被包装成派人上岛也未必消得掉的缺口，运维会被指去
+# 现场核实一件根本不用去现场的事；反过来真正的现场事项被这些条目稀释。
+_NOT_RUN = re.compile(r"本[轮次][^。；\n]{0,8}"
+                      r"(?:未查询|未完成|未判定|未做|未跑|没查|未能返回|未能取回|未能执行"
+                      r"|未执行|未返回|未取回)"
+                      r"|需补查|尚未判定|未做该判定")
+# 真·资料缺失的标记，用的是第 1.2 条的固定措辞。两个标记同时出现时**不搬**：
+# 这种条目既要重跑也要现场核实，搬走会把现场核实那一半一起带走——
+# 漏掉一项现场事项，比多留一条重跑提示危险得多。
+_NEEDS_SITE = re.compile(r"需要现场核实|需现场核实|需要现场确认|另行调查")
 
-def _is_none_item(items: list[str]) -> bool:
-    return len(items) == 1 and bool(_NONE_ITEM.match(items[0].strip()))
+
+def _reroute_not_run(unverifiable: list[str], incomplete: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """把串到「现有资料无法确认」里的「本次未完成」搬回去。
+
+    判据是确定性的字面标记，不做语义判断：条目自己写了"本轮未完成 / 需补查"，
+    这件事就是"还没算"而不是"资料没有"。两个标记都命中时保持原状。
+    """
+    moved = [u for u in unverifiable if _NOT_RUN.search(u) and not _NEEDS_SITE.search(u)]
+    if not moved:
+        return unverifiable, incomplete, []
+    rest = [u for u in unverifiable if u not in moved]
+    # 去重：模型偶发两段都写（F1 实测同一件事同时出现在两个面板），搬过来不能再叠一遍
+    merged = incomplete + [m for m in moved if m not in incomplete]
+    return rest, merged, moved
+
+
+# 纯注解行：整行是一对括号里的说明，没有业务内容。模型写「无」时常跟一行
+# 「（本次未涉及规程判定，也无遗漏对象。）」解释为什么是无。
+_ANNOTATION_ITEM = re.compile(r"^[（(][^)）]*[)）]\s*[。.．、]?$")
+
+
+def _drop_none_items(items: list[str]) -> list[str]:
+    """把「无」及其附带的注解行剔干净。
+
+    原先只认**整段恰好一行**的「无」。模型写成两行——「无。」加一行括号说明——
+    两行就都逃过归一化，面板上凭空多出两条"待核实项"，后台「无法确认」的计数
+    跟着虚高；这正是 _NONE_ITEM 那个坑的第二形态。
+    改为逐条剔：先去掉所有「无」类行，若剩下的全是注解行，这一段实为空段。
+    注解行只在**没有任何真实条目**时才丢——与真实条目并列时它可能是上一条的
+    续行，丢了就是删内容。
+    """
+    kept = [i for i in items if not _NONE_ITEM.match(i.strip())]
+    if kept and all(_ANNOTATION_ITEM.match(i.strip()) for i in kept):
+        return []
+    return kept
 
 
 def _as_items(block: str) -> list[str]:
@@ -232,7 +302,8 @@ def detect_sources(evidence: dict[str, Any]) -> list[str]:
     return found
 
 
-def build_truncation(run: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any] | None:
+def build_truncation(run: dict[str, Any], evidence: dict[str, Any],
+                     declared_incomplete: bool = False) -> dict[str, Any] | None:
     """步数用尽时，把「本轮没查完」这件事作为事实摆出来。
 
     起因是 2026-09-18 边界用例 M2 的一次实测：链路在第 6 步用尽预算，
@@ -247,10 +318,12 @@ def build_truncation(run: dict[str, Any], evidence: dict[str, Any]) -> dict[str,
     """
     if run.get("stop_reason") != "max_steps":
         return None
-    if _has_complete_sweep(evidence):
+    if swept_rules(evidence) and not declared_incomplete:
         # 步数用尽 ≠ 覆盖不全。实测 scope="all" 一次判完 25 个组合后，模型又去查
         # 工单、查手册，照样把 6 轮用光；此时挂「本轮未完成」是误报，名单是全的。
         # coverage.完整 是 sweep 写下的机器事实，用它把两种情形分开。
+        # 但模型自己写下「本次未完成」时不适用：那是它对同一个问题的另一项判定
+        # 没跑完，一条 sweep 完整证明不了别的判定也完整。
         return None
     touched = set(source_keys(evidence))
     unread = [SOURCE_LABELS[k] for k in ("alarm_records", "maintenance_records")
@@ -431,22 +504,31 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
     # 元指令泄漏先剔掉，再判空：否则一条泄漏行会把「无」撑成"有内容"
     unverifiable = [u for u in unverifiable if not _META_ITEM.search(u)]
     # 「无」是有依据的空，不是漏答
-    if _is_none_item(unverifiable):
-        unverifiable = []
+    unverifiable = _drop_none_items(unverifiable)
+
+    incomplete = _as_items(parts.get(H_INCOMPLETE, ""))
+    incomplete = [i for i in incomplete if not _META_ITEM.search(i)]
+    incomplete = _drop_none_items(incomplete)
+
+    # 串段归位要在一致性判定之前：搬完才知道「无法确认」面板最终有没有内容
+    unverifiable, incomplete, rerouted = _reroute_not_run(unverifiable, incomplete)
 
     # 两段式一致性：结论里说了"无法确认"，第二段却是空的
     conclusion = parts.get(H_CONCLUSION, "")
     unverifiable_inconsistent = bool(
         not unverifiable and conclusion and _UNVERIFIABLE_HINT.search(conclusion))
-    incomplete = _as_items(parts.get(H_INCOMPLETE, ""))
-    incomplete = [i for i in incomplete if not _META_ITEM.search(i)]
-    if _is_none_item(incomplete):
-        incomplete = []
 
     evidence = run.get("evidence", {})
     answer = parts.get(H_CONCLUSION, "").strip() or draft.strip()
     truncated = run.get("stop_reason") == "max_steps"
-    coverage_complete = _has_complete_sweep(evidence)
+    swept = swept_rules(evidence)
+    per_subject = [r for r in judged_rules(evidence) if r not in swept]
+    # 一条完整 sweep 只证明**那一项判定**判完了，证明不了整个回答覆盖完整。
+    # 多指标问题上这点是致命的：实测「全场是不是都不构成重复故障、是不是都不用现场
+    # 检修」——repeat_fault 走了 scope="all"，coverage_complete 就成了 true，步数用尽的
+    # ⚠ 提示被抑制；而模型自己在「本次未完成」里写着另外两类判定没跑。
+    # 模型自述没判完，是比"有一条 sweep 完整"更强的证据，以它为准。
+    coverage_complete = bool(swept) and not incomplete
     guard = (os.getenv("COVERAGE_GUARD") or "shadow").strip().lower()
     universal = bool(_UNIVERSAL.search(answer))
 
@@ -481,7 +563,7 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
         #   truncation —— 代码陈述的机器事实：跑了几步、哪张表整轮没被碰过
         # 界面合成一张卡展示，避免同一件事出现两块提示。
         "incomplete": incomplete,
-        "truncation": build_truncation(run, evidence),
+        "truncation": build_truncation(run, evidence, bool(incomplete)),
         # 把规则判定转成现场核实清单：同一份数据，从「我不知道」变成「你要去办的几件事」
         "checklists": build_checklists(evidence),
         "sources": detect_sources(evidence),
@@ -502,6 +584,11 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
             "truncated": truncated,
             # 证据里有没有一条覆盖全部对象的判定 —— 决定 truncated 要不要提示用户
             "coverage_complete": coverage_complete,
+            # 按 rule 记的覆盖面：哪几项判定是全场 sweep 跑的，哪几项是逐对象跑的。
+            # 一个布尔答不出"多指标问题里到底哪一项没判完"，标定时要的就是这张账。
+            "coverage_rules": {"swept": swept, "per_subject": per_subject},
+            # 从「现有资料无法确认」搬回「本次未完成」的条目，留痕供复核判据是否误伤
+            "section_rerouted": rerouted,
             # 全称结论标记：shadow 档只记不改，供标定误伤形状
             "universal_claim": universal,
             # 逐项列举漏了哪些对象（shadow 档只记不改）

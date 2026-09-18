@@ -47,6 +47,11 @@ textarea{flex:1;min-height:62px;font:inherit;padding:11px 13px;resize:vertical;
 button.go{font:inherit;padding:11px 24px;cursor:pointer;background:var(--accent);
   color:#fff;border:0;border-radius:8px}
 button.go:disabled{opacity:.5;cursor:default}
+button.go.stop{background:var(--surface-2);color:var(--ink-2);border:1px solid var(--line)}
+.qwrap{flex:1;display:flex;flex-direction:column;gap:4px}
+.count{font-family:var(--mono);font-size:11.5px;color:var(--muted);text-align:right}
+.count.near{color:var(--accent)}
+.count.full{color:var(--crit)}
 .note{color:var(--muted);font-size:12px;margin:0 0 22px}
 
 .card{background:var(--surface);border:1px solid var(--line);border-radius:8px;
@@ -183,7 +188,12 @@ ol.steps li.pending{opacity:.62}
 </section>
 
 <form id="f">
-  <textarea id="q" placeholder="例：T03 的 24002 在 2026-07-18 08:00:00 至 2026-07-19 08:00:00 内发生了多少次？是否属于重复故障？"></textarea>
+  <div class="qwrap">
+    <!-- maxlength 与后端 MAX_QUESTION_CHARS 同为 500：原型里就写了"最长 500 字"，
+         但页面没实现，于是超限只能由后端 422 兜底，界面把它显示成服务故障。 -->
+    <textarea id="q" maxlength="500" placeholder="例：T03 的 24002 在 2026-07-18 08:00:00 至 2026-07-19 08:00:00 内发生了多少次？是否属于重复故障？"></textarea>
+    <div class="count" id="qc">0 / 500</div>
+  </div>
   <button class="go" id="go" type="submit">提问</button>
 </form>
 <p class="note">时间范围一律按<b>闭区间</b>理解；数据覆盖 2026-07-01 00:00:00 ~ 2026-07-20 23:59:59。</p>
@@ -218,7 +228,7 @@ EXAMPLES.forEach(t => {
   const b = document.createElement('button');
   b.type = 'button'; b.textContent = t.length > 30 ? t.slice(0, 29) + '…' : t;
   b.title = t;
-  b.onclick = () => { $('#q').value = t; $('#q').focus(); };
+  b.onclick = () => { $('#q').value = t; $('#q').focus(); tick_count(); };
   $('#ex').appendChild(b);
 });
 
@@ -332,11 +342,43 @@ function liveView(steps, note, draft) {
   return typing + trace;
 }
 
+// 字数计数。maxlength 会静默截断粘贴进来的长文本——不显示出来，
+// 用户看不出自己的问题被截掉了一半。
+const MAX_Q = 500;
+const tick_count = () => {
+  const n = $('#q').value.length;
+  const el = $('#qc');
+  el.textContent = `${n} / ${MAX_Q}`;
+  el.className = 'count' + (n >= MAX_Q ? ' full' : n >= MAX_Q * 0.9 ? ' near' : '');
+  // maxlength 只拦用户自己敲或粘贴的那条路，脚本写进来的值照样越界。
+  // 越界时说的话必须与提交时真正会发生的事一致，不能许诺一件没人执行的事。
+  if (n === MAX_Q) el.textContent = `${n} / ${MAX_Q} · 已达上限`;
+  if (n > MAX_Q) el.textContent = `${n} / ${MAX_Q} · 已超出上限，请精简后再提交`;
+};
+$('#q').addEventListener('input', tick_count);
+tick_count();
+
+// 提问中断。多指标问题实测要 15~35 秒，期间只有一个禁用的按钮和一个计时器，
+// 问错了也只能等它跑完。
+let inflight = null;
+
 $('#f').onsubmit = async e => {
   e.preventDefault();
+  if (inflight) { inflight.abort(); return; }
   const q = $('#q').value.trim();
   if (!q) return;
-  $('#go').disabled = true;
+  if (q.length > MAX_Q) {
+    // 与后端同一条判据、同一套说法。提交上去也是 422，不如当场说清楚，
+    // 省掉一次往返，也不让用户以为是服务出了问题。
+    $('#out').innerHTML = `<div class="alert err"><h3>这条提问没能提交</h3>
+      <p style="margin:0;font-size:13.5px">提问超出 ${MAX_Q} 字上限（当前 ${q.length} 字）。
+      请精简后重试；问题分成几个小问分别提交，通常比一次问完更快拿到结论。</p></div>`;
+    return;
+  }
+  const go = $('#go');
+  go.textContent = '停止';
+  go.classList.add('stop');
+  inflight = new AbortController();
 
   const steps = [];
   let note = '正在判断需要查询哪些资料…';
@@ -354,9 +396,19 @@ $('#f').onsubmit = async e => {
   };
 
   try {
-    const r = await fetch('/ask/stream', {method: 'POST',
+    const r = await fetch('/ask/stream', {method: 'POST', signal: inflight.signal,
       headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question: q})});
-    if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
+    if (!r.ok) {
+      // 服务端已经说清楚了哪里不对（如超出字数上限），照它说的显示。
+      // 原先一律 throw 'HTTP 4xx'，最后落到"请确认服务仍在运行"——
+      // 把用户自己的输入问题说成了服务故障。
+      const b = await r.json().catch(() => null);
+      clearInterval(timer);
+      fail(b?.kind === 'bad_request' ? '这条提问没能提交' : '查询失败',
+           b?.error || `服务返回 HTTP ${r.status}。`);
+      return;
+    }
+    if (!r.body) throw new Error('HTTP ' + r.status);
 
     const reader = r.body.getReader();
     const dec = new TextDecoder();
@@ -396,10 +448,19 @@ $('#f').onsubmit = async e => {
       }
     }
   } catch (err) {
-    fail('请求失败', err + '；请确认服务仍在运行。');
+    if (err?.name === 'AbortError') {
+      $('#out').innerHTML = `<div class="alert"><h3>已停止</h3>
+        <p style="margin:0;font-size:13.5px">本次提问已中断，未产生结论。已跑过的取证步骤不保留，重新提问会从头开始。</p></div>`;
+    } else {
+      fail('请求失败', err + '；请确认服务仍在运行。');
+    }
   } finally {
     clearInterval(timer);
-    $('#go').disabled = false;
+    inflight = null;
+    const go = $('#go');
+    go.textContent = '提问';
+    go.classList.remove('stop');
+    go.disabled = false;
   }
 };
 </script>
