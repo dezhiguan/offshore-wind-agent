@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import time
 from typing import Any
@@ -26,6 +27,13 @@ from tools.pricing import basis as price_basis
 H_CONCLUSION = "结论"
 H_BASIS = "依据"
 H_UNVERIFIABLE = "现有资料无法确认"
+# 「没算完」和「要现场看」是两件事，必须分开呈现。
+#
+# 起因是一次实测：问「全场哪几台构成重复故障」，步数用尽只判完 25 个组合里的 5 个，
+# 未判的 20 个被写进「现有资料无法确认」，界面标题是「其他需现场核实的事项」——
+# 于是"我还没算"被包装成"要你去现场核实"，而正文那句全称否定看不出任何残缺。
+# 前者靠再跑一次就能消掉，后者派人上岛也未必消得掉，混在一起读者无从分辨。
+H_INCOMPLETE = "本次未完成"
 
 # 标题行的容错：模型偶发把标题写成 `**## 结论**`（三次复跑中一次），原先的严格式
 # 匹配不上 → 整篇原文落进 answer，界面直接显示 `**## 结论**` 裸标记，
@@ -35,8 +43,43 @@ _HEADING = re.compile(
     r"^[ \t]*(?:"
     r"\**[ \t]*#{1,4}[ \t]*\**"   # ## 结论 / **## 结论** / ##**结论**
     r"|\*{2,3}"                    # **结论**
-    r")[ \t]*(结论|依据|现有资料无法确认)[ \t]*[:：]?[ \t]*\**[ \t]*$",
+    r")[ \t]*(结论|依据|现有资料无法确认|本次未完成)[ \t]*[:：]?[ \t]*\**[ \t]*$",
     re.M)
+
+# 全称结论的判据。**只用来标记，不改写正文**——措辞判据一定会有误伤，
+# 而误伤一个正确结论的代价，比漏标一个残缺结论更难发现。
+#
+# 三档开关（COVERAGE_GUARD=off|shadow|enforce，默认 shadow）：
+#   off     —— 不判
+#   shadow  —— 判并记进 meta，正文不动。先用真实链路标定误伤形状，再决定要不要拦。
+#   enforce —— 除记录外，在正文前加一行提示
+# 步数用尽的事实提示（_TRUNCATION_NOTICE）不受这个开关管：stop_reason 是机器事实，
+# 不是措辞判断，不存在误伤。
+# 收紧过一次：最初写成「均不 / 都不」也算，拿 50 条真实链路一跑，5 次命中里 3 次是
+# 误伤——「备件均不可用」「备件可用与否都不能免除…」都是正常句子，与覆盖面无关。
+# 现在只认两种形态：光杆的「没有一台/无一张」，以及带全场范围词的「全场……均不」。
+_UNIVERSAL = re.compile(
+    r"没有一[台个张条项]|无一[台个张条项]|没有任何一[台个张条项]"
+    r"|(?:全场|全部|所有|九台|各台)[^。；\n]{0,15}(?:均不|都不|全都不|均未|都未)")
+
+def _has_complete_sweep(evidence: dict[str, Any]) -> bool:
+    """本次是否已有一条「覆盖全部对象」的判定。
+
+    只看 stop_reason 判不了覆盖面。实测：scope="all" 一次就把 25 个组合判完了，
+    模型拿到完整名单后又去查工单、查手册、判优先级，照样把 6 轮步数用光——
+    这时挂「可能未覆盖全部对象」的提示是误报，名单本身是全的。
+    coverage.完整 是 sweep 写下的机器事实，用它来分辨「没判完」和「判完了还在查别的」。
+    """
+    for item in evidence.get("rules") or []:
+        result = item.get("result") if isinstance(item, dict) else None
+        if isinstance(result, dict) and (result.get("coverage") or {}).get("完整"):
+            return True
+    return False
+
+
+_TRUNCATION_NOTICE = (
+    "> ⚠ 本次因查询步数用尽提前收口，下列结论**可能未覆盖全部对象**，"
+    "不要当作全场完整名单。\n\n")
 
 # 数据源统一用这四个 key 表示；回归用例的 sources: 字段写的也是它们。
 SOURCE_LABELS = {
@@ -123,8 +166,17 @@ def _clause_key(clause: str) -> tuple:
         return (9999,)
 
 
-def detect_sources(evidence: dict[str, Any]) -> list[str]:
-    """从实际用过的东西反推数据源，而不是问模型。
+def source_keys(evidence: dict[str, Any]) -> list[str]:
+    """本轮真正触达过的数据源 key（不带条款号后缀）。
+
+    与 detect_sources 同源：一份统计两处各写一遍，迟早会出现"数据源 chip 里有、
+    未读清单里也有"这种自相矛盾。
+    """
+    return _scan(evidence)[0]
+
+
+def _scan(evidence: dict[str, Any]) -> tuple[list[str], set[str]]:
+    """从实际用过的东西反推数据源，而不是问模型。返回（有序 key，引用到的条款号）。
 
     三条来源缺一不可：模型自己发的 SQL、模型自己取回的文档，以及**规则判定**。
     规程是以代码化条款的形式参与判定的，整轮问答可以一次 get_doc_section 都不调；
@@ -164,6 +216,12 @@ def detect_sources(evidence: dict[str, Any]) -> list[str]:
 
     ordered = ([k for k in SOURCE_ORDER if k in keys]
                + [k for k in keys if k not in SOURCE_ORDER])
+    return ordered, clauses
+
+
+def detect_sources(evidence: dict[str, Any]) -> list[str]:
+    """数据源 chip：key 换成展示名，规程再带上本次引用到的条款号。"""
+    ordered, clauses = _scan(evidence)
     found = []
     for key in ordered:
         label = SOURCE_LABELS.get(key, key)
@@ -172,6 +230,39 @@ def detect_sources(evidence: dict[str, Any]) -> list[str]:
             label += "（第 %s 条）" % "、".join(sorted(clauses, key=_clause_key))
         found.append(label)
     return found
+
+
+def build_truncation(run: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any] | None:
+    """步数用尽时，把「本轮没查完」这件事作为事实摆出来。
+
+    起因是 2026-09-18 边界用例 M2 的一次实测：链路在第 6 步用尽预算，
+    `maintenance_records` 一次都没查过，收口时却把工单优先级写进了
+    「现有资料无法确认」。证据不足有三种成因——资料确实没有、检索没召回、
+    执行预算耗尽——第三种被贴上了第一种的标签，看的人会以为"库里查不到"，
+    而实际是"系统没去查"。
+
+    这里只陈述可确定的事实：跑了几步、哪张表整轮没被碰过。**不去改判模型写的
+    那几条**：判断某一条无法确认到底属于哪种成因需要语义判定，而会误伤的判定
+    要先影子跑标定，不能直接上线拦人。事实摆出来，归类交给看的人。
+    """
+    if run.get("stop_reason") != "max_steps":
+        return None
+    if _has_complete_sweep(evidence):
+        # 步数用尽 ≠ 覆盖不全。实测 scope="all" 一次判完 25 个组合后，模型又去查
+        # 工单、查手册，照样把 6 轮用光；此时挂「本轮未完成」是误报，名单是全的。
+        # coverage.完整 是 sweep 写下的机器事实，用它把两种情形分开。
+        return None
+    touched = set(source_keys(evidence))
+    unread = [SOURCE_LABELS[k] for k in ("alarm_records", "maintenance_records")
+              if k not in touched]
+    return {
+        "reason": "max_steps",
+        "steps": len(run.get("trace", [])),
+        "unread_sources": unread,
+        "note": "本轮查询步数已用尽，链路未跑完即收口。下方「现有资料无法确认」中"
+                "如涉及数据库字段，可能属于**本轮未查**而非资料中没有记录，"
+                "重新提问或把问题拆细可继续核实。",
+    }
 
 
 def _clip(text: str, limit: int = BASIS_LINE_CHARS) -> str:
@@ -289,6 +380,49 @@ def render_basis(evidence: dict[str, Any]) -> list[str]:
         "（另有 %d 项依据，见下方证据面板）" % (len(unique) - BASIS_MAX_LINES)]
 
 
+# 逐项列举里漏掉对象的判据。取数捞回来 15 张工单、正文只列了 14 张却写着
+# 「其余均无问题」——这种漏是静默的：读者没有第二份名单可对，看不出少了一张。
+_ENTITY_PATTERNS = (
+    ("work_order_id", re.compile(r"WO-\d{6}")),
+    ("turbine_id", re.compile(r"(?<![0-9A-Za-z])T\d{2}(?![0-9])")),
+)
+
+
+_ID_SUFFIX = re.compile(r"^[A-Za-z]+-(\d{4,})$")
+
+
+def _suffix_mentioned(entity: str, answer: str) -> bool:
+    """「WO-260702」被缩写成「260702」时也算提到了。"""
+    m = _ID_SUFFIX.match(entity)
+    return bool(m) and re.search(r"(?<!\d)%s(?!\d)" % m.group(1), answer) is not None
+
+
+def enumeration_gap(answer: str, evidence: dict[str, Any]) -> dict[str, Any]:
+    """正文逐项列举时，漏掉了取数结果里的哪些对象。
+
+    只在「正文确实在逐项列举」时才判：提到的对象数要过半。否则一句
+    「WO-260708 关得不合规」会被判成「另外 14 张全漏了」——那是正常的单点回答。
+    """
+    gaps: dict[str, Any] = {}
+    for key, pattern in _ENTITY_PATTERNS:
+        pool: set[str] = set()
+        for table in evidence.get("tables") or []:
+            for row in table.get("rows") or []:
+                for value in row.values():
+                    if isinstance(value, str):
+                        pool.update(pattern.findall(value))
+        if len(pool) < 3:
+            continue
+        # 正文常把工单号缩写成「WO-260701、260702、260704」——后面几个省掉了前缀。
+        # 只按完整 id 匹配的话，这种正常写法会被判成「漏了 9 张」（实测 50 条里
+        # 误伤 1 条）。所以带前缀的 id 再认一次它的数字尾部。
+        mentioned = {e for e in pool if e in answer or _suffix_mentioned(e, answer)}
+        missing = sorted(pool - mentioned)
+        if missing and len(mentioned) >= max(2, len(pool) / 2):
+            gaps[key] = {"证据内": len(pool), "正文提到": len(mentioned), "未提到": missing}
+    return gaps
+
+
 def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
     draft = run.get("draft") or ""
     parts = _split_sections(draft)
@@ -304,16 +438,50 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
     conclusion = parts.get(H_CONCLUSION, "")
     unverifiable_inconsistent = bool(
         not unverifiable and conclusion and _UNVERIFIABLE_HINT.search(conclusion))
+    incomplete = _as_items(parts.get(H_INCOMPLETE, ""))
+    incomplete = [i for i in incomplete if not _META_ITEM.search(i)]
+    if _is_none_item(incomplete):
+        incomplete = []
 
     evidence = run.get("evidence", {})
+    answer = parts.get(H_CONCLUSION, "").strip() or draft.strip()
+    truncated = run.get("stop_reason") == "max_steps"
+    coverage_complete = _has_complete_sweep(evidence)
+    guard = (os.getenv("COVERAGE_GUARD") or "shadow").strip().lower()
+    universal = bool(_UNIVERSAL.search(answer))
+
+    if truncated and not coverage_complete:
+        # 步数用尽是机器事实，必须留痕，且不能只留在 meta 里——正文是主呈现面。
+        answer = _TRUNCATION_NOTICE + answer
+        if not incomplete:
+            # 模型没自觉写「本次未完成」，代码补一条：这段为空等于宣称判完了。
+            incomplete = ["本次因查询步数用尽提前收口，未能逐一判定全部对象；"
+                          "重跑本问题或缩小范围（指定风机 / 工单）可得到完整结论。"]
+
+    gaps = enumeration_gap(answer, evidence)
+    if gaps and guard == "enforce":
+        answer += "\n\n> ⚠ 取数结果中有 %s 未在上文列出。" % "；".join(
+            "%d 个%s（%s）" % (len(g["未提到"]), k, "、".join(g["未提到"][:8]))
+            for k, g in gaps.items())
+
+    if universal and not truncated and guard == "enforce":
+        answer = ("> ⚠ 本条含「全场均不…」这类全称结论，请核对下方依据是否已覆盖全部对象。"
+                  "\n\n") + answer
+
     # 依据由代码从证据渲染。渲染不出东西时（未取证拒答、或复放 2026-09-18 之前的
     # 老链路）才回落到模型写的那一段——回落也要有东西可回落，不能整段空掉。
     basis = render_basis(evidence) or _as_items(parts.get(H_BASIS, ""))
     return {
         "question": question,
-        "answer": parts.get(H_CONCLUSION, "").strip() or draft.strip(),
+        "answer": answer,
         "basis": basis,
         "unverifiable": unverifiable,
+        # 与 unverifiable 分开的第二个面。两者说的都不是「资料里没有」，但成因不同：
+        #   incomplete —— 模型自己写下的「该判而未判」，重跑即可消除
+        #   truncation —— 代码陈述的机器事实：跑了几步、哪张表整轮没被碰过
+        # 界面合成一张卡展示，避免同一件事出现两块提示。
+        "incomplete": incomplete,
+        "truncation": build_truncation(run, evidence),
         # 把规则判定转成现场核实清单：同一份数据，从「我不知道」变成「你要去办的几件事」
         "checklists": build_checklists(evidence),
         "sources": detect_sources(evidence),
@@ -330,6 +498,15 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
             "format_parsed": bool(parts),
             # 结论里写了"无法确认"、第二段却空着 —— 面板会是空的，与正文矛盾
             "unverifiable_inconsistent": unverifiable_inconsistent,
+            # 步数用尽收口 —— 结论的覆盖面存疑，后台按它筛链路
+            "truncated": truncated,
+            # 证据里有没有一条覆盖全部对象的判定 —— 决定 truncated 要不要提示用户
+            "coverage_complete": coverage_complete,
+            # 全称结论标记：shadow 档只记不改，供标定误伤形状
+            "universal_claim": universal,
+            # 逐项列举漏了哪些对象（shadow 档只记不改）
+            "enumeration_gap": gaps,
+            "coverage_guard": guard,
             # 本次会话实际进入上下文的语料占比，供界面展示与事后审计
             "budget": run.get("budget"),
             "model": run.get("model"),

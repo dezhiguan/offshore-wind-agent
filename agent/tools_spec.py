@@ -133,6 +133,15 @@ TOOLS: list[dict[str, Any]] = [
                 "会返回该规则覆盖的全部条款与原文（结果带 is_general=true），"
                 "比自己用 search_docs 找条款更全、也不会漏。"
                 "反过来，问题指向具体对象时必须带上 id，通则不能替代对具体工单的判定。"
+                "**要对多个对象做同一判定时，一次判完，禁止逐个调用**——"
+                "逐个调用会把查询步数耗在判定上，后续该查的表就查不成了。"
+                "按名单由谁给出，选其中一条："
+                "① 问「全场 / 全部 / 每台 / 逐台 / 逐单 / 有哪几台」这类盘点问题，"
+                "传 scope=\"all\"，由本工具枚举全部对象并给出完整名单；"
+                "② 已经确定要判哪几个对象时，把它们放进 subjects 一次判完。"
+                "只有 ① 的结果带 coverage 分母，因而只有 ① 能支撑"
+                "「全场没有一个……」这类全称结论；用 ② 或逐个调用得到的名单"
+                "都可能不全，把「已判的都不命中」写成「全场都不命中」是错的。"
             ),
             "parameters": {
                 "type": "object",
@@ -142,9 +151,38 @@ TOOLS: list[dict[str, Any]] = [
                         "enum": list(_RULE_HINTS),
                         "description": "；".join("%s=%s" % kv for kv in _RULE_HINTS.items()),
                     },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["all"],
+                        "description": (
+                            "盘点用。传 \"all\" 则对全场每个对象逐一判定并一次返回完整名单："
+                            "按风机 + 故障码判的规则遍历告警表里出现过的全部组合，"
+                            "按工单判的规则遍历全部工单。"
+                            "结果中 coverage.完整=true 表示名单已覆盖全部对象，"
+                            "此时才可以下「全场有/没有……」这类结论。"
+                            "传了 scope 就不要再传 turbine_id / fault_code / work_order_id。"
+                        ),
+                    },
                     "turbine_id": {"type": "string", "description": "风机编号，如 T03。"},
                     "fault_code": {"type": "string", "description": "裸故障代码，如 24002。"},
                     "work_order_id": {"type": "string", "description": "工单编号，如 WO-260708。"},
+                    "subjects": {
+                        "type": "array",
+                        "description": (
+                            "可选。批量判定对象，元素形如 {\"turbine_id\":\"T03\",\"fault_code\":\"24002\"} "
+                            "或 {\"work_order_id\":\"WO-260703\"}，一次最多 12 个。"
+                            "传了本参数就按批量判定，逐个对象各出一条结论；"
+                            "窗口等其余参数对所有对象共用。"
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "turbine_id": {"type": "string"},
+                                "fault_code": {"type": "string"},
+                                "work_order_id": {"type": "string"},
+                            },
+                        },
+                    },
                     "window_start": {"type": "string", "description": "可选。考察窗口起点，'YYYY-MM-DD HH:MM:SS'，闭区间。"},
                     "window_end": {"type": "string", "description": "可选。考察窗口终点，'YYYY-MM-DD HH:MM:SS'，闭区间。"},
                 },

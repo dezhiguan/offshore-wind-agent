@@ -503,3 +503,123 @@ class TestRemoteResetChecklist:
         from agent.checklist import build
         result = check_rule("remote_reset_ban", turbine_id="T99", fault_code="24002")
         assert build({"rules": [{"rule": "remote_reset_ban", "result": result}]}) == []
+
+
+class TestBatchSubjects:
+    """批量判定：扫描类问题的步数从 O(组合数) 压回 O(1)。
+
+    起因见 tools.rules._check_rule_batch 的注释——逐个判定把六步预算吃光，
+    该查的工单表一次都没查成，收口时却把它写成了「现有资料无法确认」。
+    """
+
+    def test_one_call_judges_every_subject(self):
+        r = check_rule("repeat_fault", subjects=[
+            {"turbine_id": "T03", "fault_code": "24002"},
+            {"turbine_id": "T07", "fault_code": "24012"},
+            {"turbine_id": "T01", "fault_code": "24001"},
+        ])
+        assert r["ok"] and r["batch"] and r["count"] == 3
+        verdicts = [i["result"]["is_repeat_fault"] for i in r["results"]]
+        assert verdicts == [True, False, False], "T03 达标、另两组不达标，一条都不能判反"
+
+    def test_subject_order_is_preserved(self):
+        """结论要能对回是哪台风机，顺序错位等于把结论安到别人头上。"""
+        subjects = [{"turbine_id": "T07", "fault_code": "24012"},
+                    {"turbine_id": "T03", "fault_code": "24002"}]
+        r = check_rule("repeat_fault", subjects=subjects)
+        assert [i["subject"] for i in r["results"]] == subjects
+
+    def test_clause_texts_deduped_to_top_level(self):
+        """同一条规程不能逐条重复内联：那正是这次要省掉的上下文。"""
+        r = check_rule("repeat_fault", subjects=[
+            {"turbine_id": "T03", "fault_code": "24002"},
+            {"turbine_id": "T07", "fault_code": "24012"},
+        ])
+        assert r["clause_texts"], "顶层没有条款原文，模型还得再取一次"
+        assert all("clause_texts" not in i["result"] for i in r["results"])
+
+    def test_shared_window_applies_to_all(self):
+        r = check_rule("repeat_fault",
+                       window_start="2026-07-18 08:00:00", window_end="2026-07-19 08:00:00",
+                       subjects=[{"turbine_id": "T03", "fault_code": "24002"}])
+        assert r["results"][0]["result"]["facts"]["指定窗口"]["次数"] == 4
+
+    def test_oversized_batch_is_refused_not_truncated(self):
+        """超限要报错。默默只判前 12 个，等于把「漏判」伪装成「判完了」。"""
+        r = check_rule("repeat_fault",
+                       subjects=[{"turbine_id": "T0%d" % (i % 9 + 1), "fault_code": "24001"}
+                                 for i in range(13)])
+        assert r["ok"] is False and "最多判定" in r["error"]
+
+    def test_empty_subjects_is_an_error(self):
+        assert check_rule("repeat_fault", subjects=[])["ok"] is False
+
+    def test_audit_fields_are_stripped_from_every_item(self):
+        """审计字段藏在每条结果下面，只剥顶层等于没剥——批量正是最容易失控的地方。"""
+        from agent.loop import _for_model
+        r = check_rule("repeat_fault", subjects=[
+            {"turbine_id": "T03", "fault_code": "24002"},
+            {"turbine_id": "T07", "fault_code": "24012"},
+        ])
+        for item in _for_model(r)["results"]:
+            assert not [k for k in item["result"] if k.startswith("_audit_")]
+
+    def test_timeline_summary_is_not_blank(self):
+        """批量结果没有单一 verdict，不特判的话时间线上就是一行空白。"""
+        from agent.loop import _summarize
+        r = check_rule("repeat_fault", subjects=[
+            {"turbine_id": "T03", "fault_code": "24002"},
+            {"turbine_id": "T07", "fault_code": "24012"},
+        ])
+        assert _summarize("check_rule", r) == "批量判定 2 个对象：1 个构成重复故障"
+
+    def test_bad_element_does_not_kill_the_whole_batch(self):
+        r = check_rule("repeat_fault",
+                       subjects=["T03", {"turbine_id": "T03", "fault_code": "24002"}])
+        assert r["count"] == 2
+        assert r["results"][0]["result"]["ok"] is False
+        assert r["results"][1]["result"]["is_repeat_fault"] is True
+# ------------------------------------------ 备件空值语义：未记录 ≠ 不需要
+# 2026-09-18 跑测：WO-260705 的 required_part 为空，原先判成「该工单不需要备件」
+# 并按达标渲染，结果同一页里规则卡说「备件 ok」而正文说「备件未记录」。
+
+def test_missing_part_is_unknown_not_ok():
+    from tools.rules import work_order_assessment
+    from agent.checklist import build
+    r = work_order_assessment("T05", "24005")
+    part = r["facts"]["工单"][0]["⑤ 备件"]
+    assert part["可用性"] == "未记录备件需求"
+    assert "无法判定" in r["verdict"]
+    assert any("备件情况无法判定" in u for u in r["unverifiable"])
+    card = build({"rules": [{"rule": "work_order_assessment", "result": r}]})[0]
+    item = next(i for i in card["items"] if i["label"] == "备件")
+    assert item["state"] == "pending"
+
+
+def test_unavailable_part_stays_blocked():
+    from tools.rules import work_order_assessment
+    from agent.checklist import build
+    r = work_order_assessment("T08", "24010")
+    assert "不可用" in r["verdict"]
+    card = build({"rules": [{"rule": "work_order_assessment", "result": r}]})[0]
+    item = next(i for i in card["items"] if i["label"] == "备件")
+    assert item["state"] == "blocked"
+
+
+def test_available_part_is_ok():
+    from tools.rules import work_order_assessment
+    from agent.checklist import build
+    r = work_order_assessment("T03", "24002")
+    card = build({"rules": [{"rule": "work_order_assessment", "result": r}]})[0]
+    item = next(i for i in card["items"] if i["label"] == "备件")
+    assert item["state"] == "ok" and item["verdict"] == "可用"
+
+
+def test_note_item_scope_is_labelled():
+    """处理记录只核对有无，标签要说清楚，否则「有」会被读成「已合规」。"""
+    from tools.rules import work_order_assessment
+    from agent.checklist import build
+    r = work_order_assessment("T05", "24005")
+    card = build({"rules": [{"rule": "work_order_assessment", "result": r}]})[0]
+    assert any(i["label"] == "处理记录（仅核对有无）" for i in card["items"])
+    assert any("第 6.1 条在工单关闭时判定" in u for u in r["unverifiable"])

@@ -15,6 +15,7 @@ SUITES = {
     "cases": "回归",
     "probes": "探针",
     "pressure": "施压",
+    "boundary": "边界",
 }
 
 

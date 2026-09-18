@@ -349,6 +349,9 @@ def work_order_assessment(turbine_id: str, fault_code: str) -> dict[str, Any]:
 
     return {
         "ok": True, "rule": "work_order_assessment", "has_work_order": True,
+        # 全场遍历要按「这条要不要拿出来说」筛选。之前只能去 verdict 里找
+        # 「存在以下问题」这几个字 —— 措辞一改筛选就失灵，且失灵的方向是漏报。
+        "has_gaps": bool(gaps),
         "verdict": verdict, "facts": {"工单": items},
         # ③ 只核对处理记录的有无，不判内容是否充分——关闭必备记录（第 6.1 条）
         # 只在工单关闭时判定，拿它去要求一张 PLANNED 工单会得出错误结论。
@@ -723,6 +726,9 @@ def replace_precondition(work_order_id: str) -> dict[str, Any]:
 
     return {
         "ok": True, "rule": "replace_precondition", "can_replace_now": False,
+        # can_replace_now 按第 5.2 条恒为 False，筛不出差异；真正有区分度的是
+        # 「哪几项明确不满足」（备件不可用、未停机），全场遍历按它排序。
+        "blocked_items": blocked,
         "verdict": verdict,
         "facts": {"工单": {k: o[k] for k in ("work_order_id", "turbine_id", "fault_code",
                                              "status", "required_part", "part_available")},
@@ -962,10 +968,234 @@ def _resolve_subject(rule: str, kwargs: dict[str, Any]) -> tuple[dict[str, Any],
     return args, None, None
 
 
+# ---------------------------------------------------------------- 全场遍历
+
+# 「命中」的判据逐条写明：什么样的对象值得在全场名单里被单独拎出来。
+#
+# 不用「verdict 里有没有某几个字」来筛 —— 措辞一改筛选就失灵，而失灵的方向是漏报，
+# 正是这次要修的那类缺陷。每条规则各给一个只看结构化字段的判据。
+def _flagged_repeat_fault(r):
+    return bool(r.get("is_repeat_fault"))
+
+
+def _flagged_priority_required(r):
+    """应有优先级与在册工单对不上 —— 含「压根没建单」。"""
+    required = r.get("required_priority")
+    if required is None:                      # 没有告警记录，无从判定
+        return False
+    current = (r.get("facts") or {}).get("现有工单") or []
+    if not current:
+        return True                           # 该建未建，本身就是要报的
+    return any(o.get("priority") != required for o in current)
+
+
+def _flagged_remote_reset_ban(r):
+    return r.get("reset_banned") is True
+
+
+def _flagged_close_compliance(r):
+    """只把硬性违规算命中。
+
+    第 6.1 条的「未在备注中体现」几乎每张已完成工单都有若干项，全算命中的话
+    名单会退化成「全部工单」，等于没筛。这些项照样逐项列在明细里，不会丢。
+    """
+    return r.get("is_compliant") is False
+
+
+def _flagged_work_order_assessment(r):
+    return bool(r.get("has_gaps")) or r.get("has_work_order") is False
+
+
+def _flagged_replace_precondition(r):
+    return bool(r.get("blocked_items"))
+
+
+_FLAGGED = {
+    "repeat_fault": _flagged_repeat_fault,
+    "priority_required": _flagged_priority_required,
+    "remote_reset_ban": _flagged_remote_reset_ban,
+    "close_compliance": _flagged_close_compliance,
+    "work_order_assessment": _flagged_work_order_assessment,
+    "replace_precondition": _flagged_replace_precondition,
+}
+
+# 全场遍历时，每条规则各自最该带出来的事实。明细里只放这些，不放整个 facts ——
+# 25 个对象每个都带上完整 facts，结果 JSON 会膨胀到几万字符。
+_SWEEP_FACTS = {
+    "repeat_fault": lambda r: {"最大24小时窗口次数": (r.get("facts") or {})
+                               .get("最大连续24小时窗口内次数"),
+                               "全部告警条数": (r.get("facts") or {}).get("全部告警条数")},
+    "priority_required": lambda r: {"应有优先级": r.get("required_priority"),
+                                    "现有工单": (r.get("facts") or {}).get("现有工单") or []},
+    "remote_reset_ban": lambda r: {"是否禁止": r.get("reset_banned")},
+    "close_compliance": lambda r: {"结论类型": r.get("verdict_kind"),
+                                   "硬性违规": (r.get("facts") or {}).get("硬性违规") or [],
+                                   "未在备注中体现": (r.get("facts") or {})
+                                   .get("未在备注中体现") or []},
+    "work_order_assessment": lambda r: {"是否有工单": r.get("has_work_order")},
+    "replace_precondition": lambda r: {"明确不满足": r.get("blocked_items") or []},
+}
+
+
+def _all_subjects(rule: str) -> list[dict[str, str]]:
+    """全场判定对象清单。
+
+    按工单判的规则取工单全集，按「风机 + 故障码」判的取告警表里实际出现过的组合 ——
+    不是 9 台 × 9 个码的笛卡尔积：没发生过的组合判出来一律「无记录」，除了把结果
+    撑大没有任何信息量。
+    """
+    if rule in _BY_WORK_ORDER:
+        return [{"work_order_id": r["work_order_id"]} for r in _rows(
+            "SELECT work_order_id FROM maintenance_records ORDER BY work_order_id")]
+    return [{"turbine_id": r["turbine_id"], "fault_code": r["fault_code"]} for r in _rows(
+        "SELECT DISTINCT turbine_id, fault_code FROM alarm_records "
+        "ORDER BY turbine_id, fault_code")]
+
+
+def sweep(rule: str) -> dict[str, Any]:
+    """把一条规则跑遍全场，一次调用给出**完整**名单。
+
+    这个入口是为了消掉一类真实缺陷：问「全场哪几台构成重复故障」时，模型一轮只调
+    一个 check_rule，25 个组合在 6 轮步数上限内只判得完 5 个，然后把「已判的 5 个都
+    不构成」写成了「全场没有一台构成重复故障」——而漏掉的恰好是唯一命中的那台
+    （T03/24002，当时正 STOPPED、CRITICAL、告警未解除）。
+
+    修法不是把步数调大（25 个组合要 25 轮，问题只是往后挪），而是让「全场」这件事
+    一次算完：遍历在代码里做，判定仍走原来那条规则函数，结论口径不变。
+
+    结果里 ``coverage`` 明确写出「判定对象总数 = 已判定数」，模型据此才敢下全称结论；
+    反过来，凡是没有这个字段的结论都不该出现「全场没有」这种话。
+    """
+    fn = RULES.get(rule)
+    if fn is None:
+        return {"ok": False, "error": "未知规则 %r，可用：%s" % (rule, "、".join(RULES))}
+
+    subjects = _all_subjects(rule)
+    is_flagged = _FLAGGED[rule]
+    facts_of = _SWEEP_FACTS[rule]
+
+    flagged: list[dict[str, Any]] = []
+    others: list[dict[str, Any]] = []
+    clauses: list[str] = []
+    for subject in subjects:
+        result = _run_tracking_sources(fn, dict(subject))
+        item = dict(subject)
+        item.update(facts_of(result))
+        if is_flagged(result):
+            item["结论"] = result.get("verdict")
+            flagged.append(item)
+            clauses = _merge_clauses(clauses, result.get("clauses"))
+        else:
+            others.append(item)
+
+    total = len(subjects)
+    label = "工单" if rule in _BY_WORK_ORDER else "「风机 + 故障码」组合"
+    if flagged:
+        head = "全场 %d 个%s已**全部**判定完毕：%d 个需要关注，%d 个不需要。" % (
+            total, label, len(flagged), len(others))
+    else:
+        head = ("全场 %d 个%s已**全部**判定完毕：没有一个需要关注。"
+                "本结论覆盖全部对象，不是抽样。" % (total, label))
+
+    return {
+        "ok": True, "rule": rule, "scope": "all",
+        # 覆盖率写成结构化字段，而不是只写在话里：收口护栏要按它判断
+        # 「这个全称结论到底有没有资格下」。
+        "coverage": {"判定对象总数": total, "已判定": total, "未判定": 0, "完整": True},
+        "flagged_count": len(flagged),
+        "verdict": head,
+        "facts": {"需关注": flagged, "其余（无需关注）": others},
+        "unverifiable": [],
+        "clauses": clauses,
+    }
+
+
+# 一次批量判定的上限。subjects 这条路是给「已经收窄过的若干对象」用的，
+# 上限不是"判不动"，而是超过这个量说明问题本身是全场盘点 —— 那种要的是
+# 完整覆盖和分母，应当走 scope="all"（见 sweep），而不是让模型自己凑一份
+# 可能不全的清单。两条路的区别就在于名单由谁给出。
+MAX_SUBJECTS = 12
+
+
+def _check_rule_batch(rule: str, subjects: Any, shared: dict[str, Any]) -> dict[str, Any]:
+    """同一条规则、多个判定对象，一次调用判完。
+
+    起因是一次实测（2026-09-18 边界用例 M2「哪些风机已达重复故障标准但工单还不是
+    HIGH」）：模型对每个风机-故障组合各调一次 check_rule，六步预算在判定上就耗光，
+    `maintenance_records` 一次都没查到，收口时却把工单优先级写进了「现有资料无法
+    确认」—— 把"自己没查"说成了"资料没有"，比漏答更误导。
+
+    根因是工具粒度：判定本身是确定性的、代价极低，贵的是每次判定都要占一个步数。
+    所以这里让一次调用带一串对象，把扫描类问题的步数从 O(组合数) 压回 O(1)。
+
+    条款原文按条款号去重后收在顶层：逐条内联会把同一段规程重复 N 遍，
+    既撑爆上下文预算，也让护栏水位虚高。
+    """
+    if not isinstance(subjects, list) or not subjects:
+        return {"ok": False, "error": "subjects 必须是非空数组，元素形如 "
+                                      "{\"turbine_id\": \"T03\", \"fault_code\": \"24002\"} "
+                                      "或 {\"work_order_id\": \"WO-260703\"}"}
+    if len(subjects) > MAX_SUBJECTS:
+        return {"ok": False, "error": "一次最多判定 %d 个对象，本次传入 %d 个。"
+                                      "请先用 query_db 收窄候选集再判定。"
+                                      % (MAX_SUBJECTS, len(subjects))}
+
+    items: list[dict[str, Any]] = []
+    clause_texts: dict[str, Any] = {}
+    for subject in subjects:
+        if not isinstance(subject, dict):
+            items.append({"subject": subject,
+                          "result": {"ok": False, "error": "subjects 的元素必须是对象"}})
+            continue
+        result = check_rule(rule, **{**shared, **subject})
+        # 原文抽到顶层去重，逐条结果里不再重复携带
+        for clause, text in (result.pop("clause_texts", None) or {}).items():
+            clause_texts.setdefault(clause, text)
+        items.append({"subject": subject, "result": result})
+
+    return {
+        "ok": True,
+        "rule": rule,
+        "batch": True,
+        "count": len(items),
+        "results": items,
+        "clause_texts": clause_texts,
+    }
+
+
 def check_rule(rule: str, **kwargs) -> dict[str, Any]:
     fn = RULES.get(rule)
     if fn is None:
         return {"ok": False, "error": "未知规则 %r，可用：%s" % (rule, "、".join(RULES))}
+
+    # 两条批量路径分工不同，都保留：
+    #   scope="all" —— 判定对象由代码枚举，覆盖全集且带 coverage 保证，
+    #                  用于「全场有哪几台」这种必须回答完整性的盘点问题；
+    #   subjects    —— 判定对象由模型给出，上限 MAX_SUBJECTS，
+    #                  用于已经收窄过的、指定若干对象的批量判定。
+    # 只有前者能支撑「全场没有一个」这类全称结论，因为只有它知道分母。
+    scope = (kwargs.pop("scope", None) or "").strip().lower()
+    subjects = kwargs.pop("subjects", None)
+    if scope and scope != "all":
+        return {"ok": False, "error": "scope 只支持 \"all\"，收到 %r。" % scope}
+    if scope == "all" and subjects is not None:
+        return {"ok": False,
+                "error": "scope=\"all\" 与 subjects 是两种批量方式，只能二选一："
+                         "要全场完整名单用 scope，要判指定的几个对象用 subjects。"}
+    if scope == "all":
+        # 放在参数解析之前 —— 这条路径没有单个判定对象，
+        # 再走 _resolve_subject 只会因为缺 turbine_id 而退化成通则。
+        extra = [k for k, v in kwargs.items()
+                 if k in ("turbine_id", "fault_code", "work_order_id") and v]
+        if extra:
+            return {"ok": False,
+                    "error": "scope=\"all\" 是全场遍历，不能同时指定 %s。"
+                             "要判具体对象就去掉 scope，要全场名单就只传 rule。"
+                             % "、".join(extra)}
+        return _attach_clause_texts(sweep(rule))
+    if subjects is not None:
+        return _check_rule_batch(rule, subjects, kwargs)
+
     try:
         kwargs, locator, early = _resolve_subject(rule, kwargs)
     except RuleInputError as exc:

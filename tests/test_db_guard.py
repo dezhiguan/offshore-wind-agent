@@ -105,12 +105,13 @@ class TestReadObjectWhitelist:
     def test_internal_objects_rejected(self, sql):
         result = query_db(sql)
         assert result["ok"] is False
-        assert "内部元数据" in result["error"]
+        assert "库外表" in result["error"]
 
     def test_authorizer_denies_even_when_the_regex_misses(self):
         """L4 正则是最弱的一环，边界由 L3 守：读对象不在白名单一律拒。"""
         assert _authorizer(sqlite3.SQLITE_READ, "sqlite_master", "name") == sqlite3.SQLITE_DENY
         assert _authorizer(sqlite3.SQLITE_READ, "alarm_records", "turbine_id") == sqlite3.SQLITE_OK
+        assert _authorizer(sqlite3.SQLITE_READ, "some_other_table", "x") == sqlite3.SQLITE_DENY
 
     @pytest.mark.parametrize("sql", [
         "SELECT COUNT(*) AS n FROM alarm_records",

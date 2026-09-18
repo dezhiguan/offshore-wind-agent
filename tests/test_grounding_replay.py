@@ -169,3 +169,55 @@ class TestReplaySkipsBrokenArtifacts:
             "result": {"error": "The read operation timed out"},
         }, ensure_ascii=False), encoding="utf-8")
         assert replay.find("T03 的 24002 是否属于重复故障？") is None
+
+
+# ------------------------------------------------- 派生数容忍（差额类假阳）
+# 2026-09-18 跑测：K6 的「缺口 105 分钟」= 门限 120 − 实际 15，两个数都在证据里，
+# 差额本身当然不在，于是被标「未找到支撑」。这类假阳必须先收干净再谈 enforce。
+
+def test_difference_is_not_flagged_but_recorded():
+    from agent import grounding
+    ev = {"rules": [{"result": {"facts": {"门限": 120, "实际": 15}}}]}
+    report = grounding.check("观察时间缺口 105 分钟。", ev)
+    assert report["flagged"] == []
+    assert [d["value"] for d in report["derived"]] == ["105"]
+    assert "120" in report["derived"][0]["from"]
+
+
+def test_fabricated_number_still_flagged():
+    from agent import grounding
+    ev = {"rules": [{"result": {"facts": {"门限": 120, "实际": 15}}}]}
+    report = grounding.check("实际观察了 47 分钟。", ev)
+    assert [f["value"] for f in report["flagged"]] == ["47"]
+    assert report["derived"] == []
+
+
+def test_sum_is_not_excused():
+    """只认差不认和：把和也放过，误放率从 2.1% 升到 13%，等于给编造开洗白通道。"""
+    from agent import grounding
+    ev = {"rules": [{"result": {"facts": {"a": 120, "b": 15}}}]}
+    assert [f["value"] for f in grounding.check("合计 135 分钟。", ev)["flagged"]] == ["135"]
+
+
+def test_enforce_ignores_derived():
+    from agent import grounding
+    ev = {"rules": [{"result": {"facts": {"门限": 120, "实际": 15}}}]}
+    saved = grounding.MODE
+    grounding.MODE = "enforce"
+    try:
+        out = grounding.apply({"answer": "缺口 105 分钟。", "evidence": ev})
+    finally:
+        grounding.MODE = saved
+    assert "grounding_enforced" not in out["meta"]
+    assert out.get("unverifiable", []) == []
+
+
+def test_off_mode_has_derived_key():
+    from agent import grounding
+    saved = grounding.MODE
+    grounding.MODE = "off"
+    try:
+        report = grounding.check("105", {})
+    finally:
+        grounding.MODE = saved
+    assert report["derived"] == []

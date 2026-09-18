@@ -45,7 +45,8 @@ def _suite_of(case_id: str, stored: str | None) -> str:
     """产物里带 suite 就用它；早期产物没有，按 id 前缀回退。"""
     if stored in SUITES:
         return stored
-    return {"P": "probes", "X": "pressure"}.get(case_id[:1].upper(), "cases")
+    return ({"P": "probes", "X": "pressure"}
+            | dict.fromkeys("BDRM", "boundary")).get(case_id[:1].upper(), "cases")
 
 
 def _case_specs() -> dict[str, dict[str, Any]]:
@@ -64,7 +65,7 @@ def cases_by_id(ids: list[str]) -> list[dict[str, Any]]:
     """按 id 取用例；ids 为空表示全部。顺序按回归 → 探针 → 施压。"""
     specs = _case_specs()
     wanted = {i.strip().upper() for i in ids if i.strip()}
-    rank = {"cases": 0, "probes": 1, "pressure": 2}
+    rank = {"cases": 0, "probes": 1, "pressure": 2, "boundary": 3}
     picked = [c for cid, c in specs.items() if not wanted or cid.upper() in wanted]
     picked.sort(key=lambda c: (rank.get(c.get("_suite"), 9), len(c["id"]), c["id"]))
     return picked
@@ -278,7 +279,7 @@ def load() -> dict[str, Any]:
         })
 
     def order(item: dict[str, Any]) -> tuple:
-        rank = {"cases": 0, "probes": 1, "pressure": 2}
+        rank = {"cases": 0, "probes": 1, "pressure": 2, "boundary": 3}
         return (rank.get(item["suite"], 9), item["id"][:1], len(item["id"]), item["id"])
 
     items.sort(key=order)

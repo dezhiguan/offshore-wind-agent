@@ -263,6 +263,25 @@ function render(d) {
   // 有结构化清单时优先展示清单——它把「无法确认」从免责声明变成可执行的核实项。
   // 清单只覆盖规程有明文条目的部分，剩余的自由文本说明仍以提示条呈现。
   (d.checklists || []).forEach(c => P.push(checklistCard(c)));
+  // 「还没算完」排在「要现场核实」前面，两者必须分得开：前者重跑一次就能消掉，
+  // 后者派人上岛也未必消得掉。混成一张时，读者会把「本次只判完 5/25」读成
+  // 「剩下的要去现场看」，从而把残缺结论当成完整结论。
+  //
+  // 但自己也别摊成两张：truncation 是代码陈述的机器事实（跑了几步、哪张表整轮
+  // 没碰），incomplete 是模型写下的该判未判项 —— 同一件事的两个侧面，合成一张卡。
+  if (d.truncation || d.incomplete?.length) {
+    const T = d.truncation, bits = [];
+    if (T) bits.push(`<p style="margin:0 0 6px;font-size:13.5px">${md(T.note)}</p>
+      <p style="margin:0;font-size:13.5px">已执行 ${T.steps} 步工具调用${
+        T.unread_sources?.length
+          ? `；本轮未读取：${T.unread_sources.map(esc).join('、')}` : ''}。</p>`);
+    if (d.incomplete?.length) bits.push(`<ul style="margin:${T ? '8px' : '0'} 0 0">${
+      d.incomplete.map(u => `<li>${md(u)}</li>`).join('')}</ul>`);
+    P.push(`<div class="alert err"><h3>${T ? '本轮未完成查询' : '本次未完成的判定'}</h3>
+      ${bits.join('')}
+      <p style="margin:6px 0 0;font-size:12.5px;opacity:.85">这些不是需要现场核实的事项，
+      是本次尚未查完 / 算完的部分——重跑本问题或把问题拆细即可继续。</p></div>`);
+  }
   if (d.unverifiable?.length) P.push(`<div class="alert"><h3>其他需现场核实的事项</h3><ul>${
     d.unverifiable.map(u => `<li>${md(u)}</li>`).join('')}</ul></div>`);
 

@@ -165,6 +165,29 @@ class TestBasisRenderedFromEvidence:
         run = dict(RUN, evidence={"tables": [], "docs": [], "rules": []})
         assert len(compose("q", run)["basis"]) == 2  # 回落到草稿里那两行
 
+    def test_completed_run_has_no_truncation_block(self):
+        """跑完的链路不该挂"没查完"的牌子。"""
+        assert compose("q", RUN)["truncation"] is None
+
+    def test_max_steps_run_reports_what_was_never_read(self):
+        """步数用尽：把「本轮没查完」和没读过的表作为事实摆出来。
+
+        不摆出来的话，模型写进「现有资料无法确认」的那几条会被读成
+        「库里没有」，而实际是「系统没去查」。
+        """
+        run = dict(RUN, stop_reason="max_steps")
+        t = compose("q", run)["truncation"]
+        assert t["reason"] == "max_steps"
+        assert t["steps"] == 1
+        # 本轮只查了 alarm_records，工单表一次没读
+        assert t["unread_sources"] == ["维检工单记录（maintenance_records）"]
+
+    def test_truncation_does_not_rewrite_the_models_own_items(self):
+        """只陈述事实，不改判模型写的那几条——改判属于会误伤的语义判定。"""
+        run = dict(RUN, stop_reason="max_steps")
+        out = compose("q", run)
+        assert out["unverifiable"] == ["现场安全条件", "责任归属"]
+
     def test_general_rule_keeps_its_clause_sections(self):
         """通则调用的 verdict 是一句免责说明，压掉条款行就只剩这句话了。"""
         run = dict(RUN, evidence={
@@ -205,3 +228,62 @@ class TestUnverifiableConsistency:
     def test_clean_answer_is_not_flagged(self):
         out = self._run("## 结论\nT01 共 5 条告警。\n\n## 现有资料无法确认\n无")
         assert out["meta"]["unverifiable_inconsistent"] is False
+
+
+# --------------------------------------------------------- 标题容错与「无」归一化
+# 2026-09-18 跑测发现：模型偶发把标题写成 `**## 结论**`（K1 三次复跑中一次），
+# 原先的严格式正则匹配不上，整篇原文落进 answer、「现有资料无法确认」整段丢失。
+
+def test_heading_tolerates_bold_wrappers():
+    from agent.composer import _split_sections
+    for draft in (
+        "## 结论\nA\n\n## 现有资料无法确认\n无\n",
+        "**## 结论**\nA\n\n**## 现有资料无法确认**\n无。\n",
+        "**结论**\nA\n\n**现有资料无法确认**\n- x\n",
+        "##**结论**\nA\n\n### 现有资料无法确认：\n无\n",
+    ):
+        parts = _split_sections(draft)
+        assert "结论" in parts, draft
+        assert "现有资料无法确认" in parts, draft
+
+
+def test_bold_heading_draft_is_parsed_not_dumped():
+    """加粗标题的整篇原文不应再原样落进 answer。"""
+    run = {"draft": "**## 结论**\nT06 型号 OWT-5.0A。\n\n**## 现有资料无法确认**\n无。\n",
+           "evidence": {}, "trace": []}
+    out = compose("T06 的型号？", run)
+    assert out["meta"]["format_parsed"] is True
+    assert "##" not in out["answer"]
+    assert out["answer"] == "T06 型号 OWT-5.0A。"
+    assert out["unverifiable"] == []
+
+
+def test_none_item_with_parenthetical_is_empty():
+    """「无（……）。」是有依据的空，不是一条真实的无法确认项。"""
+    run = {"draft": "## 结论\nA\n\n## 现有资料无法确认\n无（本题为手册条文查询，答案完整）。\n",
+           "evidence": {}, "trace": []}
+    assert compose("Q", run)["unverifiable"] == []
+
+
+def test_real_unverifiable_item_survives():
+    """不能过度归一化：真实的无法确认项必须留下。"""
+    run = {"draft": "## 结论\nA\n\n## 现有资料无法确认\n- 母线电压——现有资料无法确认。\n",
+           "evidence": {}, "trace": []}
+    assert compose("Q", run)["unverifiable"] == ["母线电压——现有资料无法确认。"]
+
+
+def test_prompt_meta_wording_leak_is_dropped():
+    """提示词里的格式纪律被模型抄进列表，属元指令泄漏，不是业务结论。"""
+    draft = ("## 结论\nA\n\n## 现有资料无法确认\n"
+             "- 母线电压是否降至约 20 V——需现场核实。\n"
+             "- （依规程第 1.2 条措辞：现有资料无法确认，需要现场核实。）\n")
+    out = compose("Q", {"draft": draft, "evidence": {}, "trace": []})
+    assert out["unverifiable"] == ["母线电压是否降至约 20 V——需现场核实。"]
+
+
+def test_meta_filter_keeps_substantive_clause_mention():
+    """只剔「措辞」那一类；正常提到第 1.2 条的业务内容要保留。"""
+    draft = ("## 结论\nA\n\n## 现有资料无法确认\n"
+             "- 规程第 1.2 条要求现场留痕，本次无记录。\n")
+    out = compose("Q", {"draft": draft, "evidence": {}, "trace": []})
+    assert out["unverifiable"] == ["规程第 1.2 条要求现场留痕，本次无记录。"]
