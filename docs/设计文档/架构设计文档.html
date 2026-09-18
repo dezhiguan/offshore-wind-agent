@@ -67,7 +67,7 @@ footer{margin-top:60px;padding-top:16px;border-top:1px solid var(--line);
 <div class="meta">
 <table>
 <tr><th>文档版本</th><td>V1.0</td></tr>
-<tr><th>拟制日期</th><td>2026-09-18</td></tr>
+<tr><th>拟制日期</th><td>2026-09-17</td></tr>
 <tr><th>对应实现</th><td>分支 <code>main</code>，提交 <code>4a4e310</code>；模型 <code>qwen3.8-flash</code>（OpenAI 兼容端点）</td></tr>
 <tr><th>适用范围</th><td>问答服务、管理后台、评测与回放子系统</td></tr>
 <tr><th>关联文档</th><td>《原型设计文档》《验收标准文档》《设计说明》及四份专项测试报告</td></tr>
@@ -77,7 +77,7 @@ footer{margin-top:60px;padding-top:16px;border-top:1px solid var(--line);
 <h4>修订记录</h4>
 <table>
 <tr><th class="nw">版本</th><th class="nw">日期</th><th>修订内容</th><th class="nw">拟制</th></tr>
-<tr><td>V1.0</td><td>2026-09-18</td><td>依据当前实现补齐架构文档：分层视图、运行时视图、关键机制、接口契约、ADR 与演进路线</td><td>架构组</td></tr>
+<tr><td>V1.0</td><td>2026-09-17</td><td>依据当前实现补齐架构文档：分层视图、运行时视图、关键机制、接口契约、ADR 与演进路线</td><td>架构组</td></tr>
 </table>
 
 <div class="toc">
@@ -490,7 +490,7 @@ footer{margin-top:60px;padding-top:16px;border-top:1px solid var(--line);
 <h2 id="s11">十一、演进路线与阶段目标</h2>
 <table>
 <tr><th class="nw">阶段</th><th class="nw">目标日期</th><th>内容</th><th>完成判据</th></tr>
-<tr><td>已完成</td><td>2026-09-18</td><td>四工具编排、四层守卫、六条规则、上下文预算三档、核实清单、链路追踪与质量中心、53 条用例 + 263 项单测</td><td>见《验收标准文档》基线数据</td></tr>
+<tr><td>已完成</td><td>2026-09-17</td><td>四工具编排、四层守卫、六条规则、上下文预算三档、核实清单、链路追踪与质量中心、53 条用例 + 263 项单测</td><td>见《验收标准文档》基线数据</td></tr>
 <tr><td>E1</td><td>2026-09-30</td><td>接地校验 shadow → enforce：沉淀误判样本为回归用例</td><td>连续两轮 53 条用例零误伤，方可切档</td></tr>
 <tr><td>E2</td><td>2026-10-15</td><td>规则配置化：条款号、阈值、必备记录项抽到配置文件，规则引擎只留算法</td><td>换一套条款编号只改配置即可通过现有规则单测</td></tr>
 <tr><td>E3</td><td>2026-10-31</td><td>检索 RRF 混合（向量 + BM25）</td><td>37 条检索探针 top4 召回率较 81% 基线提升且无单项回退</td></tr>
@@ -499,7 +499,7 @@ footer{margin-top:60px;padding-top:16px;border-top:1px solid var(--line);
 </table>
 
 <footer>
-海上风电机组维检 Agent · 架构设计文档 V1.0 · 2026-09-18 · 与《原型设计文档》《验收标准文档》配套使用
+海上风电机组维检 Agent · 架构设计文档 V1.0 · 2026-09-17 · 与《原型设计文档》《验收标准文档》配套使用
 </footer>
 
 </div>
