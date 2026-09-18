@@ -2,15 +2,19 @@
 """只读数据库访问层。
 
 题目要求数据库作为只读资料使用（机试题目说明 第五节）。这里不依赖单一手段，
-而是叠四层防护，任何一层单独失效都不会导致写入：
+而是叠五层防护，任何一层单独失效都不会导致写入或越权读取：
 
   L1  连接层：URI 以 mode=ro 打开，SQLite 引擎层面拒绝写
   L2  会话层：PRAGMA query_only = ON
-  L3  授权层：set_authorizer 白名单，只放行 SELECT / READ / FUNCTION 类操作
-  L4  语句层：单语句 + SELECT/WITH 开头 + 关键字黑名单（同时负责给出可读的报错）
+  L3  授权层：set_authorizer 白名单，只放行 SELECT / READ / FUNCTION 类操作，
+      并对 READ 动作按表名做白名单——只放行两张业务表，其余表（含 sqlite_master
+      等内部表）一律拒绝，杜绝越权枚举库结构或读取库外数据
+  L4  语句层：单语句 + SELECT/WITH 开头 + 写关键字黑名单 + 表名白名单预检
+      （同时负责给出可读的报错）
 
 L4 放在最后，是因为正则是最弱的一环——它的主要价值是产生一句模型看得懂的
-错误信息以便重写，而不是充当安全边界。
+错误信息以便重写，真正的安全边界是引擎级的 L1~L3。表级白名单在 L3 授权层
+硬约束、L4 语句层给友好提示，两处协同。
 """
 from __future__ import annotations
 
@@ -40,13 +44,25 @@ _ALLOWED_ACTIONS = {
     if hasattr(sqlite3, name)
 }
 
+# L3/L4 表级白名单：只有这两张业务表可读，其余表（含 sqlite_master 等内部表）一律拒绝。
+# 生产链路的表结构固化在 SCHEMA_PROMPT 里，运行时不需要再查 sqlite_master，
+# 因此可以安全地把库结构枚举也挡在外面，收敛信息泄露面。
+_ALLOWED_TABLES = {"alarm_records", "maintenance_records"}
+
 
 class SqlGuardError(Exception):
     """语句未通过守卫。消息会原样回灌给模型，用于重写重试。"""
 
 
-def _authorizer(action: int, *_args) -> int:
-    return sqlite3.SQLITE_OK if action in _ALLOWED_ACTIONS else sqlite3.SQLITE_DENY
+def _authorizer(action: int, arg1=None, *_args) -> int:
+    # 动作类型不在白名单：直接拒
+    if action not in _ALLOWED_ACTIONS:
+        return sqlite3.SQLITE_DENY
+    # READ 动作 arg1 为表名：按表级白名单收口，挡住越权读表与 sqlite_master 枚举
+    read_action = getattr(sqlite3, "SQLITE_READ", None)
+    if read_action is not None and action == read_action and arg1 not in _ALLOWED_TABLES:
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
 
 
 def _strip_comments(sql: str) -> str:
@@ -78,6 +94,20 @@ def check_sql(sql: str) -> str:
             raise SqlGuardError(
                 "数据库为只读题目资料，禁止 %s 操作（检测到关键字 %s）。" % (cn, kw)
             )
+
+    # L4 表级白名单预检：FROM / JOIN 后引用的表必须在白名单内。
+    # 这只是给模型一句可读的提示以便重写，真正的硬约束在 L3 授权层。
+    # WITH 定义的 CTE 别名不是真实表，需先收集起来一并放行，否则会误伤合法查询。
+    cte_names = {c.lower() for c in re.findall(
+        r"(?:\bWITH\b|,)\s+(?:RECURSIVE\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+AS\s*\(", body, flags=re.I)}
+    referenced = {t.lower() for t in re.findall(
+        r"\b(?:FROM|JOIN)\s+[\"\'\`\[]?([A-Za-z_][A-Za-z0-9_]*)", body, flags=re.I)}
+    illegal = sorted(t for t in referenced if t not in _ALLOWED_TABLES and t not in cte_names)
+    if illegal:
+        raise SqlGuardError(
+            "只允许查询业务表 %s，本次语句引用了库外表 %s（含 sqlite_master 等内部表一律不可查）。"
+            % ("、".join(sorted(_ALLOWED_TABLES)), "、".join(illegal))
+        )
 
     # 无 LIMIT 时补一个，避免一次拉回整表
     if not re.search(r"\bLIMIT\b", upper):

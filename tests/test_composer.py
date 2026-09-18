@@ -165,6 +165,29 @@ class TestBasisRenderedFromEvidence:
         run = dict(RUN, evidence={"tables": [], "docs": [], "rules": []})
         assert len(compose("q", run)["basis"]) == 2  # 回落到草稿里那两行
 
+    def test_completed_run_has_no_truncation_block(self):
+        """跑完的链路不该挂"没查完"的牌子。"""
+        assert compose("q", RUN)["truncation"] is None
+
+    def test_max_steps_run_reports_what_was_never_read(self):
+        """步数用尽：把「本轮没查完」和没读过的表作为事实摆出来。
+
+        不摆出来的话，模型写进「现有资料无法确认」的那几条会被读成
+        「库里没有」，而实际是「系统没去查」。
+        """
+        run = dict(RUN, stop_reason="max_steps")
+        t = compose("q", run)["truncation"]
+        assert t["reason"] == "max_steps"
+        assert t["steps"] == 1
+        # 本轮只查了 alarm_records，工单表一次没读
+        assert t["unread_sources"] == ["维检工单记录（maintenance_records）"]
+
+    def test_truncation_does_not_rewrite_the_models_own_items(self):
+        """只陈述事实，不改判模型写的那几条——改判属于会误伤的语义判定。"""
+        run = dict(RUN, stop_reason="max_steps")
+        out = compose("q", run)
+        assert out["unverifiable"] == ["现场安全条件", "责任归属"]
+
     def test_general_rule_keeps_its_clause_sections(self):
         """通则调用的 verdict 是一句免责说明，压掉条款行就只剩这句话了。"""
         run = dict(RUN, evidence={

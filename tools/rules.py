@@ -1110,15 +1110,81 @@ def sweep(rule: str) -> dict[str, Any]:
     }
 
 
+# 一次批量判定的上限。subjects 这条路是给「已经收窄过的若干对象」用的，
+# 上限不是"判不动"，而是超过这个量说明问题本身是全场盘点 —— 那种要的是
+# 完整覆盖和分母，应当走 scope="all"（见 sweep），而不是让模型自己凑一份
+# 可能不全的清单。两条路的区别就在于名单由谁给出。
+MAX_SUBJECTS = 12
+
+
+def _check_rule_batch(rule: str, subjects: Any, shared: dict[str, Any]) -> dict[str, Any]:
+    """同一条规则、多个判定对象，一次调用判完。
+
+    起因是一次实测（2026-09-18 边界用例 M2「哪些风机已达重复故障标准但工单还不是
+    HIGH」）：模型对每个风机-故障组合各调一次 check_rule，六步预算在判定上就耗光，
+    `maintenance_records` 一次都没查到，收口时却把工单优先级写进了「现有资料无法
+    确认」—— 把"自己没查"说成了"资料没有"，比漏答更误导。
+
+    根因是工具粒度：判定本身是确定性的、代价极低，贵的是每次判定都要占一个步数。
+    所以这里让一次调用带一串对象，把扫描类问题的步数从 O(组合数) 压回 O(1)。
+
+    条款原文按条款号去重后收在顶层：逐条内联会把同一段规程重复 N 遍，
+    既撑爆上下文预算，也让护栏水位虚高。
+    """
+    if not isinstance(subjects, list) or not subjects:
+        return {"ok": False, "error": "subjects 必须是非空数组，元素形如 "
+                                      "{\"turbine_id\": \"T03\", \"fault_code\": \"24002\"} "
+                                      "或 {\"work_order_id\": \"WO-260703\"}"}
+    if len(subjects) > MAX_SUBJECTS:
+        return {"ok": False, "error": "一次最多判定 %d 个对象，本次传入 %d 个。"
+                                      "请先用 query_db 收窄候选集再判定。"
+                                      % (MAX_SUBJECTS, len(subjects))}
+
+    items: list[dict[str, Any]] = []
+    clause_texts: dict[str, Any] = {}
+    for subject in subjects:
+        if not isinstance(subject, dict):
+            items.append({"subject": subject,
+                          "result": {"ok": False, "error": "subjects 的元素必须是对象"}})
+            continue
+        result = check_rule(rule, **{**shared, **subject})
+        # 原文抽到顶层去重，逐条结果里不再重复携带
+        for clause, text in (result.pop("clause_texts", None) or {}).items():
+            clause_texts.setdefault(clause, text)
+        items.append({"subject": subject, "result": result})
+
+    return {
+        "ok": True,
+        "rule": rule,
+        "batch": True,
+        "count": len(items),
+        "results": items,
+        "clause_texts": clause_texts,
+    }
+
+
 def check_rule(rule: str, **kwargs) -> dict[str, Any]:
     fn = RULES.get(rule)
     if fn is None:
         return {"ok": False, "error": "未知规则 %r，可用：%s" % (rule, "、".join(RULES))}
 
-    # scope="all"：一次判完全场，见 sweep 的注释。放在参数解析之前 —— 这条路径
-    # 没有单个判定对象，再走 _resolve_subject 只会因为缺 turbine_id 而退化成通则。
+    # 两条批量路径分工不同，都保留：
+    #   scope="all" —— 判定对象由代码枚举，覆盖全集且带 coverage 保证，
+    #                  用于「全场有哪几台」这种必须回答完整性的盘点问题；
+    #   subjects    —— 判定对象由模型给出，上限 MAX_SUBJECTS，
+    #                  用于已经收窄过的、指定若干对象的批量判定。
+    # 只有前者能支撑「全场没有一个」这类全称结论，因为只有它知道分母。
     scope = (kwargs.pop("scope", None) or "").strip().lower()
+    subjects = kwargs.pop("subjects", None)
+    if scope and scope != "all":
+        return {"ok": False, "error": "scope 只支持 \"all\"，收到 %r。" % scope}
+    if scope == "all" and subjects is not None:
+        return {"ok": False,
+                "error": "scope=\"all\" 与 subjects 是两种批量方式，只能二选一："
+                         "要全场完整名单用 scope，要判指定的几个对象用 subjects。"}
     if scope == "all":
+        # 放在参数解析之前 —— 这条路径没有单个判定对象，
+        # 再走 _resolve_subject 只会因为缺 turbine_id 而退化成通则。
         extra = [k for k, v in kwargs.items()
                  if k in ("turbine_id", "fault_code", "work_order_id") and v]
         if extra:
@@ -1127,8 +1193,8 @@ def check_rule(rule: str, **kwargs) -> dict[str, Any]:
                              "要判具体对象就去掉 scope，要全场名单就只传 rule。"
                              % "、".join(extra)}
         return _attach_clause_texts(sweep(rule))
-    if scope and scope != "all":
-        return {"ok": False, "error": "scope 只支持 \"all\"，收到 %r。" % scope}
+    if subjects is not None:
+        return _check_rule_batch(rule, subjects, kwargs)
 
     try:
         kwargs, locator, early = _resolve_subject(rule, kwargs)
