@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -28,7 +29,15 @@ from tools.retriever import get_index  # noqa: E402
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-app = FastAPI(title="海上风电机组维检 Agent", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """启动即预热，把冷启动的代价从第一个提问那一侧挪回到启动这一侧。"""
+    warm_up()
+    yield
+
+
+app = FastAPI(title="海上风电机组维检 Agent", version="1.0.0", lifespan=lifespan)
 
 # 后台管理页面（Agent 质量中心、链路追踪）单独成文件，运行上同进程同端口
 app.include_router(admin_router)
@@ -68,12 +77,6 @@ def _invalid_request(request: Request, exc: RequestValidationError) -> JSONRespo
         msg = "提问格式不正确：question 需要是 1~%d 字的文本。" % MAX_QUESTION_CHARS
     return JSONResponse(status_code=422,
                         content={"ok": False, "kind": "bad_request", "error": msg})
-
-
-@app.on_event("startup")
-def _warm_up() -> None:
-    """启动即预热，把冷启动的代价从第一个提问那一侧挪回到启动这一侧。"""
-    warm_up()
 
 
 @app.get("/health")
