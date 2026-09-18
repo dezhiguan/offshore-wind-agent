@@ -27,7 +27,16 @@ H_CONCLUSION = "结论"
 H_BASIS = "依据"
 H_UNVERIFIABLE = "现有资料无法确认"
 
-_HEADING = re.compile(r"^#{1,4}\s*(结论|依据|现有资料无法确认)\s*$", re.M)
+# 标题行的容错：模型偶发把标题写成 `**## 结论**`（三次复跑中一次），原先的严格式
+# 匹配不上 → 整篇原文落进 answer，界面直接显示 `**## 结论**` 裸标记，
+# 「现有资料无法确认」整段丢失，而 format_parsed 之外的指标照样全绿。
+# 这里放宽到三种写法：`## 结论`、`**## 结论**`、`**结论**`，并容忍结尾冒号。
+_HEADING = re.compile(
+    r"^[ \t]*(?:"
+    r"\**[ \t]*#{1,4}[ \t]*\**"   # ## 结论 / **## 结论** / ##**结论**
+    r"|\*{2,3}"                    # **结论**
+    r")[ \t]*(结论|依据|现有资料无法确认)[ \t]*[:：]?[ \t]*\**[ \t]*$",
+    re.M)
 
 # 数据源统一用这四个 key 表示；回归用例的 sources: 字段写的也是它们。
 SOURCE_LABELS = {
@@ -70,6 +79,21 @@ def _split_sections(text: str) -> dict[str, str]:
         stop = marks[i + 1][0] if i + 1 < len(marks) else len(text)
         out[name] = text[end:stop].strip()
     return out
+
+
+# 「无」的各种写法。原先只认四个字面量，模型写「无（本题为手册条文查询，答案完整）。」
+# 就被当成一条真实的"无法确认"项渲染出去——给正确答案挂了个假的未知项，
+# 后台「无法确认」的计数也跟着虚高。
+_NONE_ITEM = re.compile(r"^(?:无|none|n/?a|不适用|-|—)\s*(?:[（(].*[)）])?\s*[。.．、]?$", re.I)
+
+# 提示词里给模型看的格式纪律（第 1.2 条的固定措辞），被模型当成一条业务结论写进
+# 「现有资料无法确认」列表。这是元指令泄漏，不是业务内容，确定性剔掉。
+# 提示词侧也已改写（见 agent/prompts.py），两头都堵。
+_META_ITEM = re.compile(r"第\s*1\.2\s*条.*措辞|措辞.*第\s*1\.2\s*条")
+
+
+def _is_none_item(items: list[str]) -> bool:
+    return len(items) == 1 and bool(_NONE_ITEM.match(items[0].strip()))
 
 
 def _as_items(block: str) -> list[str]:
@@ -263,8 +287,10 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
     parts = _split_sections(draft)
 
     unverifiable = _as_items(parts.get(H_UNVERIFIABLE, ""))
+    # 元指令泄漏先剔掉，再判空：否则一条泄漏行会把「无」撑成"有内容"
+    unverifiable = [u for u in unverifiable if not _META_ITEM.search(u)]
     # 「无」是有依据的空，不是漏答
-    if len(unverifiable) == 1 and unverifiable[0] in {"无", "无。", "None", "-"}:
+    if _is_none_item(unverifiable):
         unverifiable = []
 
     evidence = run.get("evidence", {})

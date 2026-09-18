@@ -316,12 +316,17 @@ def work_order_assessment(turbine_id: str, fault_code: str) -> dict[str, Any]:
             "② 状态": o["status"],
             "③ 处理记录": {"有无": bool(note), "原文": note or None},
             "④ 观察时间": {"分钟": obs, "是否达到120分钟门限": (obs is not None and obs >= MIN_OBSERVATION_MINUTES)},
+            # required_part 为空**不等于**「不需要备件」——数据库只是没记录需求，
+            # 这是系统的边界，不是一条好消息。原先把两者合成一句
+            # 「该工单不需要备件或未记录」并按达标渲染，结果同一页里规则卡说
+            # 「备件 ok」而正文说「备件未记录」，自相矛盾。按本项目一贯的三分法，
+            # 未记录归入"无法确认"（pending），只有 part_available=0 才是"明确不满足"。
             "⑤ 备件": ({"名称": part,
-                       "可用性": {1: "可用", 0: "不可用"}.get(avail, "未记录备件需求")}
-                      if part else {"名称": None, "可用性": "该工单不需要备件或未记录"}),
+                       "可用性": {1: "可用", 0: "不可用"}.get(avail, "未记录可用性")}
+                      if part else {"名称": None, "可用性": "未记录备件需求"}),
         })
 
-    gaps = []
+    gaps, unknowns = [], []
     for it in items:
         wo = it["工单编号"]
         if not it["① 优先级"]["是否达标"]:
@@ -330,14 +335,26 @@ def work_order_assessment(turbine_id: str, fault_code: str) -> dict[str, Any]:
             gaps.append("%s 无处理记录" % wo)
         if it["⑤ 备件"]["可用性"] == "不可用":
             gaps.append("%s 所需备件「%s」当前不可用（第 7.2 条）" % (wo, it["⑤ 备件"]["名称"]))
+        elif it["⑤ 备件"]["可用性"].startswith("未记录"):
+            unknowns.append("%s 的备件情况无法判定：数据库%s（第 7.1 条）"
+                            % (wo, it["⑤ 备件"]["可用性"]))
 
-    verdict = ("工单安排存在以下问题：" + "；".join(gaps) + "。") if gaps else \
-              "五项要素（优先级、状态、处理记录、观察时间、备件）均未发现与规程冲突之处。"
+    if gaps:
+        verdict = "工单安排存在以下问题：" + "；".join(gaps) + "。"
+    else:
+        verdict = "五项要素（优先级、状态、处理记录、观察时间、备件）未发现与规程冲突之处。"
+    # 未记录的项不是"无冲突"，必须说出来：否则"均未发现冲突"读起来像五项全部核过
+    if unknowns:
+        verdict += "另有以下项无法由现有资料判定：" + "；".join(unknowns) + "。"
 
     return {
         "ok": True, "rule": "work_order_assessment", "has_work_order": True,
         "verdict": verdict, "facts": {"工单": items},
-        "unverifiable": ["备件的实物库存、预留、型号兼容与现场领用状态（第 7.1 条：字段已简化）"],
+        # ③ 只核对处理记录的有无，不判内容是否充分——关闭必备记录（第 6.1 条）
+        # 只在工单关闭时判定，拿它去要求一张 PLANNED 工单会得出错误结论。
+        "unverifiable": ["备件的实物库存、预留、型号兼容与现场领用状态（第 7.1 条：字段已简化）",
+                         "处理记录的内容是否充分（原因、措施、复检）——本项仅核对有无，"
+                         "内容充分性依第 6.1 条在工单关闭时判定"] + unknowns,
         # ① 优先级那一项整个来自 priority_required，它援引到的条款同样是本次判定的依据。
         # 只调了 work_order_assessment 的那一轮，第 2.1 / 4.1 条不该因为"隔了一层函数"就消失。
         "clauses": _merge_clauses(["2.4", "7.1", "7.2"], expected.get("clauses")),

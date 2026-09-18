@@ -113,14 +113,23 @@ def _from_work_order(result: dict[str, Any]) -> dict[str, Any] | None:
          "note": "当前 %s，应为 %s" % (pr.get("值"), pr.get("应为")),
          "verdict": "达标" if pr.get("是否达标") else "不达标"},
         {"label": "状态", "state": "ok", "note": str(o.get("② 状态", "")), "verdict": str(o.get("② 状态", ""))},
-        {"label": "处理记录", "state": "ok" if o.get("③ 处理记录", {}).get("有无") else "blocked",
+        # 标签点明"仅核对有无"：内容是否充分是第 6.1 条在关单时判的事，
+        # 不加这四个字，卡片上的「有」会被读成「处理记录已合规」。
+        {"label": "处理记录（仅核对有无）",
+         "state": "ok" if o.get("③ 处理记录", {}).get("有无") else "blocked",
          "note": (o.get("③ 处理记录", {}).get("原文") or "无记录"),
          "verdict": "有" if o.get("③ 处理记录", {}).get("有无") else "无"},
         {"label": "观察时间", "state": "ok" if obs.get("是否达到120分钟门限") else "blocked",
          "note": "%s 分钟" % obs.get("分钟") if obs.get("分钟") is not None else "未进入观察阶段",
          "verdict": "达标" if obs.get("是否达到120分钟门限") else "未达标"},
-        {"label": "备件", "state": "blocked" if avail == "不可用" else "ok",
-         "note": "%s · %s" % (part.get("名称") or "不需要备件", avail), "verdict": str(avail)},
+        # 三分法：不可用=blocked（明确的坏消息）、未记录=pending（系统边界）、
+        # 可用=ok。原先把"未记录"也画成 ok，卡片与正文因此自相矛盾。
+        {"label": "备件",
+         "state": ("blocked" if avail == "不可用"
+                   else "pending" if str(avail).startswith("未记录") else "ok"),
+         "note": ("%s · %s" % (part.get("名称"), avail) if part.get("名称")
+                  else str(avail)),
+         "verdict": str(avail)},
     ]
     return {
         "key": "work_order_assessment",
