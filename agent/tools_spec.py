@@ -133,6 +133,10 @@ TOOLS: list[dict[str, Any]] = [
                 "会返回该规则覆盖的全部条款与原文（结果带 is_general=true），"
                 "比自己用 search_docs 找条款更全、也不会漏。"
                 "反过来，问题指向具体对象时必须带上 id，通则不能替代对具体工单的判定。"
+                "**问「全场 / 全部 / 每台 / 逐台 / 逐单 / 有哪几台」这类盘点问题时，"
+                "传 scope=\"all\" 一次判完全场，不要逐个对象反复调用本工具**——"
+                "逐个调用会在步数上限前只判完一小部分，而把「已判的都不命中」"
+                "写成「全场都不命中」是错的。"
             ),
             "parameters": {
                 "type": "object",
@@ -141,6 +145,18 @@ TOOLS: list[dict[str, Any]] = [
                         "type": "string",
                         "enum": list(_RULE_HINTS),
                         "description": "；".join("%s=%s" % kv for kv in _RULE_HINTS.items()),
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["all"],
+                        "description": (
+                            "盘点用。传 \"all\" 则对全场每个对象逐一判定并一次返回完整名单："
+                            "按风机 + 故障码判的规则遍历告警表里出现过的全部组合，"
+                            "按工单判的规则遍历全部工单。"
+                            "结果中 coverage.完整=true 表示名单已覆盖全部对象，"
+                            "此时才可以下「全场有/没有……」这类结论。"
+                            "传了 scope 就不要再传 turbine_id / fault_code / work_order_id。"
+                        ),
                     },
                     "turbine_id": {"type": "string", "description": "风机编号，如 T03。"},
                     "fault_code": {"type": "string", "description": "裸故障代码，如 24002。"},
