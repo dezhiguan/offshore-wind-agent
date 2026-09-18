@@ -579,3 +579,47 @@ class TestBatchSubjects:
         assert r["count"] == 2
         assert r["results"][0]["result"]["ok"] is False
         assert r["results"][1]["result"]["is_repeat_fault"] is True
+# ------------------------------------------ 备件空值语义：未记录 ≠ 不需要
+# 2026-09-18 跑测：WO-260705 的 required_part 为空，原先判成「该工单不需要备件」
+# 并按达标渲染，结果同一页里规则卡说「备件 ok」而正文说「备件未记录」。
+
+def test_missing_part_is_unknown_not_ok():
+    from tools.rules import work_order_assessment
+    from agent.checklist import build
+    r = work_order_assessment("T05", "24005")
+    part = r["facts"]["工单"][0]["⑤ 备件"]
+    assert part["可用性"] == "未记录备件需求"
+    assert "无法判定" in r["verdict"]
+    assert any("备件情况无法判定" in u for u in r["unverifiable"])
+    card = build({"rules": [{"rule": "work_order_assessment", "result": r}]})[0]
+    item = next(i for i in card["items"] if i["label"] == "备件")
+    assert item["state"] == "pending"
+
+
+def test_unavailable_part_stays_blocked():
+    from tools.rules import work_order_assessment
+    from agent.checklist import build
+    r = work_order_assessment("T08", "24010")
+    assert "不可用" in r["verdict"]
+    card = build({"rules": [{"rule": "work_order_assessment", "result": r}]})[0]
+    item = next(i for i in card["items"] if i["label"] == "备件")
+    assert item["state"] == "blocked"
+
+
+def test_available_part_is_ok():
+    from tools.rules import work_order_assessment
+    from agent.checklist import build
+    r = work_order_assessment("T03", "24002")
+    card = build({"rules": [{"rule": "work_order_assessment", "result": r}]})[0]
+    item = next(i for i in card["items"] if i["label"] == "备件")
+    assert item["state"] == "ok" and item["verdict"] == "可用"
+
+
+def test_note_item_scope_is_labelled():
+    """处理记录只核对有无，标签要说清楚，否则「有」会被读成「已合规」。"""
+    from tools.rules import work_order_assessment
+    from agent.checklist import build
+    r = work_order_assessment("T05", "24005")
+    card = build({"rules": [{"rule": "work_order_assessment", "result": r}]})[0]
+    assert any(i["label"] == "处理记录（仅核对有无）" for i in card["items"])
+    assert any("第 6.1 条在工单关闭时判定" in u for u in r["unverifiable"])
