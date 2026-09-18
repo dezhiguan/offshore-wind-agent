@@ -116,8 +116,17 @@ def _clause_key(clause: str) -> tuple:
         return (9999,)
 
 
-def detect_sources(evidence: dict[str, Any]) -> list[str]:
-    """从实际用过的东西反推数据源，而不是问模型。
+def source_keys(evidence: dict[str, Any]) -> list[str]:
+    """本轮真正触达过的数据源 key（不带条款号后缀）。
+
+    与 detect_sources 同源：一份统计两处各写一遍，迟早会出现"数据源 chip 里有、
+    未读清单里也有"这种自相矛盾。
+    """
+    return _scan(evidence)[0]
+
+
+def _scan(evidence: dict[str, Any]) -> tuple[list[str], set[str]]:
+    """从实际用过的东西反推数据源，而不是问模型。返回（有序 key，引用到的条款号）。
 
     三条来源缺一不可：模型自己发的 SQL、模型自己取回的文档，以及**规则判定**。
     规程是以代码化条款的形式参与判定的，整轮问答可以一次 get_doc_section 都不调；
@@ -157,6 +166,12 @@ def detect_sources(evidence: dict[str, Any]) -> list[str]:
 
     ordered = ([k for k in SOURCE_ORDER if k in keys]
                + [k for k in keys if k not in SOURCE_ORDER])
+    return ordered, clauses
+
+
+def detect_sources(evidence: dict[str, Any]) -> list[str]:
+    """数据源 chip：key 换成展示名，规程再带上本次引用到的条款号。"""
+    ordered, clauses = _scan(evidence)
     found = []
     for key in ordered:
         label = SOURCE_LABELS.get(key, key)
@@ -165,6 +180,34 @@ def detect_sources(evidence: dict[str, Any]) -> list[str]:
             label += "（第 %s 条）" % "、".join(sorted(clauses, key=_clause_key))
         found.append(label)
     return found
+
+
+def build_truncation(run: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any] | None:
+    """步数用尽时，把「本轮没查完」这件事作为事实摆出来。
+
+    起因是 2026-09-18 边界用例 M2 的一次实测：链路在第 6 步用尽预算，
+    `maintenance_records` 一次都没查过，收口时却把工单优先级写进了
+    「现有资料无法确认」。证据不足有三种成因——资料确实没有、检索没召回、
+    执行预算耗尽——第三种被贴上了第一种的标签，看的人会以为"库里查不到"，
+    而实际是"系统没去查"。
+
+    这里只陈述可确定的事实：跑了几步、哪张表整轮没被碰过。**不去改判模型写的
+    那几条**：判断某一条无法确认到底属于哪种成因需要语义判定，而会误伤的判定
+    要先影子跑标定，不能直接上线拦人。事实摆出来，归类交给看的人。
+    """
+    if run.get("stop_reason") != "max_steps":
+        return None
+    touched = set(source_keys(evidence))
+    unread = [SOURCE_LABELS[k] for k in ("alarm_records", "maintenance_records")
+              if k not in touched]
+    return {
+        "reason": "max_steps",
+        "steps": len(run.get("trace", [])),
+        "unread_sources": unread,
+        "note": "本轮查询步数已用尽，链路未跑完即收口。下方「现有资料无法确认」中"
+                "如涉及数据库字段，可能属于**本轮未查**而非资料中没有记录，"
+                "重新提问或把问题拆细可继续核实。",
+    }
 
 
 def _clip(text: str, limit: int = BASIS_LINE_CHARS) -> str:
@@ -302,6 +345,8 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
         "answer": parts.get(H_CONCLUSION, "").strip() or draft.strip(),
         "basis": basis,
         "unverifiable": unverifiable,
+        # 步数用尽时另开一块：「本轮没查完」和「资料里没有」不是一回事
+        "truncation": build_truncation(run, evidence),
         # 把规则判定转成现场核实清单：同一份数据，从「我不知道」变成「你要去办的几件事」
         "checklists": build_checklists(evidence),
         "sources": detect_sources(evidence),
