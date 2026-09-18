@@ -19,6 +19,7 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,43 @@ def tokenize(text: str, keep_stopwords: bool = False) -> list[str]:
             continue
         out.append(t)
     return out
+
+
+@lru_cache(maxsize=1)
+def catalog() -> str:
+    """两份文档的目录：只有章节标题，没有任何正文。
+
+    注进系统提示词，和 SCHEMA_PROMPT 是同一个道理——题面红线禁的是把整个文档
+    放进上下文，目录不在此列，而没有目录模型就只能凭印象猜有哪些条款。实测代价
+    是实打实的：问「第 2.5 条和第 8.3 条怎么规定的」（两条都不存在），模型连查
+    9 步撞上步数上限才敢说不存在；而同一次回答里列举第六章条款时又漏掉了第 6.4 条
+    「最低观察时间」——恰恰是关单判定最常命中的那条，却用的是「第六章只规定……」
+    这种完整枚举的口吻。
+
+    刻意不走 Index：建索引要分词（jieba 首次加载约 2.4 秒），而这里只需要扫标题行。
+    """
+    lines: list[str] = []
+    for doc, path in DOCS.items():
+        chapter = ""
+        grouped: dict[str, list[str]] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("### "):
+                title = line[4:].strip()
+                clause = _CLAUSE_NO.search(title)
+                grouped.setdefault(chapter, []).append(
+                    "%s %s" % (clause.group(1), title[clause.end():].strip()) if clause else title)
+            elif line.startswith("## "):
+                chapter = line[3:].strip()
+        if not grouped:
+            continue
+        # 条数由代码数好写进去：模型自己数列表会错（实测列了 9 个却说「只收录 8 个」），
+        # 和"禁止心算次数"是同一条纪律——能确定性算出来的，就不要让它数。
+        total = sum(len(v) for v in grouped.values())
+        lines.append("《%s》（共 %d 章、%d 节）：" % (path.stem, len(grouped), total))
+        for chap, items in grouped.items():
+            prefix = "  %s（%d 节）：" % (chap, len(items)) if chap else "  "
+            lines.append(prefix + " / ".join(items))
+    return "\n".join(lines)
 
 
 def _split_sections(raw: str, doc: str) -> list[Chunk]:

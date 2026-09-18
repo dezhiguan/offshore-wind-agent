@@ -202,6 +202,34 @@ class TestBasisRenderedFromEvidence:
         assert "第 4.1 条 禁止远程复位" in basis[1]
 
 
+class TestUnverifiableConsistency:
+    """结论里说了"无法确认"，第二段却空着。
+
+    对抗性测试里模型把 7 项未确认条件全写进了结论，第二段写「无」——界面那块
+    面板读的是第二段，显示为空，等于把模型自己说出来的缺口藏了起来。
+    这里只标记不回填：从自由文本里切句子，切错比空着更糟。
+    """
+
+    def _run(self, draft):
+        return compose("问题", {"draft": draft, "trace": [], "evidence": {}})
+
+    def test_inconsistent_when_conclusion_says_unconfirmed_but_section_empty(self):
+        out = self._run("## 结论\n母线电压现有资料无法确认，需要现场核实。\n\n"
+                        "## 现有资料无法确认\n无")
+        assert out["unverifiable"] == []
+        assert out["meta"]["unverifiable_inconsistent"] is True
+
+    def test_consistent_when_items_are_listed_in_the_section(self):
+        out = self._run("## 结论\n母线电压现有资料无法确认。\n\n"
+                        "## 现有资料无法确认\n- 母线电压实测值，需要现场核实。")
+        assert out["unverifiable"]
+        assert out["meta"]["unverifiable_inconsistent"] is False
+
+    def test_clean_answer_is_not_flagged(self):
+        out = self._run("## 结论\nT01 共 5 条告警。\n\n## 现有资料无法确认\n无")
+        assert out["meta"]["unverifiable_inconsistent"] is False
+
+
 # --------------------------------------------------------- 标题容错与「无」归一化
 # 2026-09-18 跑测发现：模型偶发把标题写成 `**## 结论**`（K1 三次复跑中一次），
 # 原先的严格式正则匹配不上，整篇原文落进 answer、「现有资料无法确认」整段丢失。

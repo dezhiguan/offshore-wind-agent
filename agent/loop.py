@@ -25,7 +25,7 @@ from typing import Any
 
 from openai import OpenAI
 
-from agent.prompts import SYSTEM_PROMPT
+from agent.prompts import OUT_OF_SCOPE_MARK, SYSTEM_PROMPT
 from agent.tools_spec import TOOLS, TOOL_REGISTRY
 from agent.tracing import DEGRADED, ERROR, OK, TOOL_KIND, Trace
 from tools.budget import ContextBudget, measure
@@ -419,6 +419,18 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
                 yield event
 
             if not msg.tool_calls:
+                content = msg.content or ""
+                # 范围外声明是护栏的**合规出口**：问题压根不落在四类资料里
+                # （问模型是谁、问天气、问外部标准），没有任何工具能给出依据，
+                # 打回只会逼它去查点无关的东西凑数——实测它就是这么干的，
+                # 而凑出来的那段自由发挥里混着没人核对的数字。
+                # 判据是固定串而不是语义猜测：出口必须确定，否则等于没有红线。
+                if not trace and OUT_OF_SCOPE_MARK in content:
+                    tr.record("GUARD", "范围外声明", status=DEGRADED,
+                              output_summary="模型声明问题超出四类资料范围，按合规拒答放行，不再要求取证")
+                    stop_reason = "out_of_scope"
+                    draft = content
+                    break
                 # 一次工具都没调就想作答 —— 踩红线，打回
                 if not trace and ungrounded_retries < MAX_UNGROUNDED_RETRIES:
                     ungrounded_retries += 1
@@ -435,7 +447,10 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
                     messages.append({
                         "role": "user",
                         "content": "不允许在未检索任何资料的情况下作答。请先调用 query_db "
-                                   "或 search_docs 取得依据，再回答。",
+                                   "或 search_docs 取得依据，再回答。"
+                                   "若该问题确实超出随题四类资料的范围（系统实现、密钥配置、"
+                                   "天气实况、外部标准等），不要为了取证去查无关资料，"
+                                   "直接拒答并在「结论」段首句写明「%s」。" % OUT_OF_SCOPE_MARK,
                     })
                     continue
                 if not trace:
