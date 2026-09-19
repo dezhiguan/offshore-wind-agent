@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections.abc import Iterator
 from functools import lru_cache
@@ -52,6 +53,54 @@ _TRUNCATED_MARK = "⚠ 输出被长度上限截断："
 ENABLE_THINKING = os.getenv("ENABLE_THINKING", "false").lower() in {"1", "true", "yes"}
 # 流式返回下连接保持时间更长；实测 60 秒会偶发读超时，演示中途失败比慢更糟
 TIMEOUT = float(os.getenv("LLM_TIMEOUT_SECONDS", "120"))
+
+# 采样参数。此前一次都没传，走的是厂商默认（qwen 系默认带随机性），于是同一条用例
+# 跑两次是两份不同的答案：2026-09-19 的四轮全量跑测 53 条里挂 0~4 条，每轮挂的还不是
+# 同一批 —— 两轮分数严格说不可比，改动有没有效果也就无从判断。
+# 判定链路要的是可复现，不是文采；温度归零，seed 可按需固定。
+TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0"))
+_SEED = os.getenv("LLM_SEED")
+SAMPLING: dict[str, Any] = {"temperature": TEMPERATURE}
+if _SEED:
+    SAMPLING["seed"] = int(_SEED)
+
+# 模型把函数调用模板的残片当正文吐出来的形状。2026-09-19 回归用例 Q6 实测：规则引擎
+# 已经把 WO-260708 / 120 分钟 / 不符合关闭要求原样交回来了，成文那一次却只回了
+# `<previous_tool_call>\n\n</previous_tool_call>` 共 11 个 token，链路照单全收当成最终答案。
+# 判据是字面控制残片，不做语义判断，因此不存在误伤正常正文的可能。
+_JUNK_MARKUP = re.compile(
+    r"</?\s*(?:previous_)?(?:tool_call|tool_response|function_call|function_results)\s*[^>]*>",
+    re.I)
+# 去掉残片后仍够不上这个字数，就不是一份能发出去的正文。三段标题本身就有三十多字，
+# 真实最短的一份正文是 127 字（探针 P6），与这条线之间留着足够余量。
+MIN_ANSWER_CHARS = 40
+
+
+# 问题里点名的库内对象：工单号、风机号、故障码。命中说明这件事**有**对应的表可查，
+# 「资料里没有这个字段」得查过才说得出口 —— 与「问题不落在四类资料范围内」不是一回事。
+# 不用 \b 划边界：中文在 Unicode 下也是 \w，「24011故障」里数字两侧都不成边界，
+# 整条规则会在没有空格的中文问句上静默失效。改用只排除数字/字母的前后瞻。
+_DB_ENTITY = re.compile(r"WO-\d+|(?<![A-Za-z])[Tt]\d{2}(?!\d)|(?<!\d)\d{5}(?!\d)")
+
+
+def _names_db_entity(question: str) -> bool:
+    return bool(_DB_ENTITY.search(question or ""))
+
+
+def _unusable_answer(content: str) -> str | None:
+    """正文不可用的理由；可用则返回 None。
+
+    只认两种确定性形态：整段只剩控制残片（或干脆是空的），以及短到不可能是一份
+    三段式答案。范围外声明那条合规出口天然简短，按标记放行。
+    """
+    text = _JUNK_MARKUP.sub("", content or "").strip()
+    if not text:
+        return "正文为空或只剩控制残片"
+    if OUT_OF_SCOPE_MARK in content:
+        return None
+    if len(text) < MIN_ANSWER_CHARS:
+        return "正文只有 %d 字，不足以构成一份答案" % len(text)
+    return None
 
 
 class LlmNotConfigured(RuntimeError):
@@ -149,7 +198,7 @@ def _call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Tra
         stream = client.chat.completions.create(
             model=model, messages=messages, tools=TOOLS, stream=True,
             stream_options={"include_usage": True},
-            extra_body={"enable_thinking": ENABLE_THINKING},
+            extra_body={"enable_thinking": ENABLE_THINKING}, **SAMPLING,
         )
         for chunk in stream:
             if getattr(chunk, "usage", None):
@@ -418,6 +467,8 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
     stop_reason = "completed"
 
     ungrounded_retries = 0
+    # 范围外声明被要求先取证的次数。上限 1，见下面那段说明。
+    scope_challenges = 0
     # 界面上此刻是否挂着一段还没定稿的正文。只要这段会被后面的分支作废
     # （未取证打回、拒答、步数用尽重写），就必须先发 answer_reset 把它撤掉，
     # 否则新正文会直接续写在旧正文后面——线上实测一次提问被写成了两份答案。
@@ -451,6 +502,27 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
                 # 而凑出来的那段自由发挥里混着没人核对的数字。
                 # 判据是固定串而不是语义猜测：出口必须确定，否则等于没有红线。
                 if not trace and OUT_OF_SCOPE_MARK in content:
+                    # 出口有一个前置条件：问题点名了库内对象（工单号 / 风机号 / 故障码）时，
+                    # 「资料里没有这个字段」与「问题不落在四类资料范围内」是两件事，
+                    # 前者必须查过那张表才说得出口。2026-09-19 边界用例 B8 实测：问
+                    # 「WO-260708 这张工单是谁关闭的」，工单就在库里、只是没有人员字段，
+                    # 模型却走了范围外出口，0 步作答 —— 话说对了，证据一条没取。
+                    #
+                    # 只拦一次。再声明一次就放行：真·范围外的问题只要捎带一个风机号
+                    # （「T08 那边今天天气如何」）就被逼着去查无关的东西凑数的话，
+                    # 正是这个出口当初要消掉的毛病，不能为了堵一个洞把它重新挖开。
+                    if _names_db_entity(question) and not scope_challenges:
+                        scope_challenges += 1
+                        tr.record("GUARD", "范围外声明待核实", status=DEGRADED,
+                                  output_summary="问题点名了库内对象，已要求先取证再判断是否属范围外")
+                        if streamed:
+                            yield {"type": "answer_reset"}
+                            streamed = False
+                        yield {"type": "thinking",
+                               "message": "问题里点到了库内对象，先核实一次再判断…"}
+                        messages.append(_plain(msg))
+                        messages.append({"role": "user", "content": _SCOPE_CHALLENGE})
+                        continue
                     tr.record("GUARD", "范围外声明", status=DEGRADED,
                               output_summary="模型声明问题超出四类资料范围，按合规拒答放行，不再要求取证")
                     stop_reason = "out_of_scope"
@@ -490,6 +562,36 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
                              "## 现有资料无法确认\n- 全部事项，需要重新提问或缩小问题范围")
                     break
                 draft = msg.content or ""
+                # 正文不可用就重写一次。此前这里是无条件收下：只要这一轮没发工具调用，
+                # 模型吐出来的东西就是最终答案 —— Q6 那次的「答案」是 11 个 token 的
+                # 控制残片，照样进了成文、进了指标、进了页面。
+                # 重写不带工具：证据已经齐了（trace 非空），这一步要的只是把话写出来。
+                # 只重写一次：还是残片就是这一轮它写不出来，再烧一次多半是同样的东西，
+                # 而耗时是实打实翻倍的。
+                reason = _unusable_answer(draft)
+                if reason:
+                    tr.record("GUARD", "成文不可用", status=DEGRADED,
+                              output_summary="%s，已要求重写" % reason)
+                    if streamed:
+                        yield {"type": "answer_reset"}
+                        streamed = False
+                    yield {"type": "thinking", "message": "这一轮没有写出可用正文，正在重写…"}
+                    messages.append(_plain(msg))
+                    messages.append({"role": "user", "content": _REWRITE_INSTRUCTION})
+                    draft, _ = _closing_call(client, model, messages, tr,
+                                             "成文重写", with_tools=False)
+                    reason = _unusable_answer(draft)
+                    if reason is None:
+                        yield {"type": "token", "text": draft}
+                if reason:
+                    # 重写仍不可用：如实说出来，不拿残片冒充答案。措辞与未取证拒答一致 ——
+                    # 两者都是"这次没有可用产出"，口径上也一并从「有效回答」里剔除。
+                    tr.record("GUARD", "成文不可用", status=ERROR,
+                              output_summary="重写后仍不可用（%s），未产出可用正文" % reason)
+                    stop_reason = "answer_unusable"
+                    draft = ("## 结论\n本次未能生成可用正文：模型连续两次输出不可用，"
+                             "已取得的证据见下方依据，请重跑本问题。\n\n## 依据\n（见证据面板）\n\n"
+                             "## 现有资料无法确认\n- 本轮结论未能成文，需重跑")
                 break
 
             messages.append(_plain(msg))
@@ -612,6 +714,20 @@ def run_agent_stream(question: str) -> Iterator[dict[str, Any]]:
     }
 
 
+_SCOPE_CHALLENGE = (
+    "问题里点名的工单号 / 风机号 / 故障码就在随题数据库里，这件事有表可查。"
+    "「资料里没有这个字段」与「问题超出四类资料范围」是两件事：前者必须先查过对应的表"
+    "才能下结论，不能凭表结构直接断言。请先调用 query_db 取回该对象所在的记录再回答；"
+    "取回之后，如果问到的要点确实不在四类资料里，照原格式说明即可。"
+)
+
+_REWRITE_INSTRUCTION = (
+    "上一条回复不是一份可用的正文。请基于上面已经取得的证据，直接按三段格式重写答案："
+    "「## 结论」「## 依据」「## 现有资料无法确认」。不要再调用工具，不要输出任何标签，"
+    "不要复述这条指令。"
+)
+
+
 def _force_answer(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Trace) -> str:
     """步数用尽时，要求模型基于已有证据收口，而不是无声截断。
 
@@ -637,12 +753,14 @@ def _force_answer(client: OpenAI, model: str, messages: list[dict[str, Any]], tr
     })
     content, called_tools = _closing_call(client, model, messages, trace,
                                           "步数用尽收口", with_tools=True)
-    if content.strip() or not called_tools:
+    # 判据原先是「正文为空且又发了工具调用」。空只是不可用的一种形态：只剩控制残片
+    # 同样发不出去，而它 .strip() 非空，照原判据会被直接放行（见 _unusable_answer）。
+    if _unusable_answer(content) is None:
         return content
-    # 正文为空且又发了工具调用：撤下工具再问一次，这次它没有别的选择
-    content, _ = _closing_call(client, model, messages, trace,
-                               "步数用尽收口（撤下工具重试）", with_tools=False)
-    return content
+    # 撤下工具再问一次，这次它没有别的选择
+    retry, _ = _closing_call(client, model, messages, trace,
+                             "步数用尽收口（撤下工具重试）", with_tools=False)
+    return retry or content
 
 
 def _closing_call(client: OpenAI, model: str, messages: list[dict[str, Any]], trace: Trace,
@@ -657,7 +775,7 @@ def _closing_call(client: OpenAI, model: str, messages: list[dict[str, Any]], tr
     try:
         resp = client.chat.completions.create(
             model=model, messages=messages, extra_body={"enable_thinking": ENABLE_THINKING},
-            **extra,
+            **SAMPLING, **extra,
         )
     except Exception as exc:
         # 非流式调用异常时连 usage 对象都没有，同样标成"未计量"

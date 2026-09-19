@@ -18,7 +18,8 @@ from datetime import datetime
 from collections import deque
 from typing import Any
 
-from agent.tracing import answer_ms, answer_share_pct, latency_buckets, p95 as _p95
+from agent.tracing import (NO_ANSWER_STOPS, answer_ms, answer_share_pct,
+                           latency_buckets, p95 as _p95)
 from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO, MAX_SINGLE_DOC_RATIO
 
 MAX_TRACES = 50
@@ -56,8 +57,12 @@ def _diagnose(spans: list[dict[str, Any]], meta: dict[str, Any]) -> tuple[str, l
     # 它们走 stats 的独立指标与链路详情字段，看得见但不改判任何链路的状态。
     elif stop == "refused_ungrounded":
         notes.append({"kind": "未取证拒答", "text": "两次均未调用任何工具，已拒绝作答而非放行无依据回答"})
+    elif stop == "answer_unusable":
+        notes.append({"kind": "成文失败",
+                      "text": "模型两次输出均不是可用正文（空或只剩控制残片），"
+                              "已按未产出处理而非把残片当答案发出"})
 
-    if any(s.get("status") == "ERROR" for s in spans) or stop == "refused_ungrounded":
+    if any(s.get("status") == "ERROR" for s in spans) or stop in NO_ANSWER_STOPS:
         return "DEGRADED", notes
     if notes:
         return "DEGRADED", notes
@@ -151,7 +156,7 @@ def listing(source: str | None = None) -> list[dict[str, Any]]:
     return [dict({k: v for k, v in t.items() if k not in ("spans", "answer", "unverifiable")},
                  unverifiable_count=len(t.get("unverifiable") or []),
                  answered=bool((t.get("answer") or "").strip())
-                          and t.get("stop_reason") != "refused_ungrounded")
+                          and t.get("stop_reason") not in NO_ANSWER_STOPS)
             for t in _pick(source)]
 
 
@@ -197,7 +202,7 @@ def stats(source: str | None = None) -> dict[str, Any]:
     # 非空还不够：未取证拒答写出来的正文同样非空（"无法回答：…"），
     # 只查非空会把"宁可不答"算成有效回答。与离线档同一条判据。
     answered = sum(1 for t in items if (t.get("answer") or "").strip()
-                   and t.get("stop_reason") != "refused_ungrounded")
+                   and t.get("stop_reason") not in NO_ANSWER_STOPS)
     refused = sum(1 for t in items if t.get("stop_reason") == "refused_ungrounded")
     max_steps = sum(1 for t in items if t.get("stop_reason") == "max_steps")
     flagged = sum(1 for t in items if t.get("unverifiable"))

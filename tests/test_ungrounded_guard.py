@@ -94,3 +94,49 @@ class TestRedLineStillHolds:
         retry = client.calls[1]["messages"][-1]
         assert retry["role"] == "user"
         assert OUT_OF_SCOPE_MARK in retry["content"]
+
+
+class TestExitNeedsEvidenceWhenTheQuestionNamesAnEntity:
+    """问题点名了库内对象时，范围外出口要先核实一次。
+
+    2026-09-19 边界用例 B8 实测：「WO-260708 这张工单是谁关闭的？处理人是谁？」——
+    工单就在库里，只是没有人员字段。模型打出范围外标记，0 步直接作答；话是对的，
+    但一次证据都没取，「使用的数据源」整个是空的。
+    「资料里没有这个字段」与「问题不落在四类资料范围内」被共用了一个出口，
+    而前者必须查过那张表才说得出口。
+    """
+
+    ANSWER = "## 结论\n%s\n\n## 现有资料无法确认\n- 处理人" % OUT_OF_SCOPE_MARK
+
+    def test_first_declaration_is_challenged(self, monkeypatch):
+        client = _StubClient(self.ANSWER, self.ANSWER)
+        run = _run(monkeypatch, client, question="WO-260708 这张工单是谁关闭的？处理人是谁？")
+        guards = [s["name"] for s in run["spans"] if s["kind"] == "GUARD"]
+        assert guards[0] == "范围外声明待核实"
+        assert len(client.calls) == 2, "应当先要求它取证一次"
+
+    def test_second_declaration_is_let_through(self, monkeypatch):
+        """只拦一次：真·范围外的问题捎带一个风机号，不能被逼着去查无关的东西凑数。"""
+        client = _StubClient(self.ANSWER, self.ANSWER)
+        run = _run(monkeypatch, client, question="WO-260708 这张工单是谁关闭的？处理人是谁？")
+        assert run["stop_reason"] == "out_of_scope"
+        assert run["draft"] == self.ANSWER
+
+    def test_question_without_any_entity_is_untouched(self, monkeypatch):
+        """问天气、问模型是谁：没有任何对象可查，出口照旧当场放行。"""
+        client = _StubClient(self.ANSWER)
+        run = _run(monkeypatch, client, question="你用的什么模型？")
+        assert run["stop_reason"] == "out_of_scope"
+        assert len(client.calls) == 1
+
+    def test_entity_shapes_recognised(self):
+        from agent.loop import _names_db_entity
+        assert _names_db_entity("WO-260708 是谁关的")
+        assert _names_db_entity("T08 现在什么状态")
+        assert _names_db_entity("24010 怎么处理")
+        # 中文在 Unicode 下也算 \w：用 \b 划边界的话，这两条没有空格的中文问句
+        # 一条都匹配不上，规则等于没写
+        assert _names_db_entity("24011故障怎么处理")
+        assert _names_db_entity("查一下T08现在的状态")
+        assert not _names_db_entity("你用的什么模型？")
+        assert not _names_db_entity("观察时间要满 120 分钟吗")

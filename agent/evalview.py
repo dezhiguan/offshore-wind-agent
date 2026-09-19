@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
 
 from agent.composer import detect_sources  # noqa: E402
 from agent.tracing import (  # noqa: E402
-    answer_ms, answer_share_pct, latency_buckets, p95 as _p95,
+    NO_ANSWER_STOPS, answer_ms, answer_share_pct, latency_buckets, p95 as _p95,
 )
 from eval.verdict import SUITES, check  # noqa: E402
 from tools.budget import MAX_DOC_RATIO, MAX_ROW_RATIO, MAX_SINGLE_DOC_RATIO  # noqa: E402
@@ -381,7 +381,7 @@ def metrics(items: list[dict[str, Any]]) -> dict[str, Any]:
     refused = sum(1 for i in items if i.get("stop_reason") == "refused_ungrounded")
     completed = sum(1 for i in items
                     if (i.get("answer") or "").strip()
-                    and i.get("stop_reason") != "refused_ungrounded")
+                    and i.get("stop_reason") not in NO_ANSWER_STOPS)
 
     # 链路完成率：正常收口，未撞步数上限、未被拒答。
     # 注意它**不看**链路内部有没有降级：工具报错后模型自己纠正、护栏打回后重新取证，
