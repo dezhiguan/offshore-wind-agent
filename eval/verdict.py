@@ -39,9 +39,14 @@ def said(result: dict[str, Any]) -> str:
 
     判定的对象是模型的结论。证据由代码渲染，拿它判模型等于自己给自己打分。
     """
+    # 「现有资料无法确认」段里由 composer 从规则判定补进去的条目同样不算（2026-09-18 加）：
+    # 模型漏写第二段时系统会替它补齐（meta.section_backfilled），那是代码渲染的文本，
+    # 计进判定就等于用例靠系统的补救蒙对，模型的三段纪律退化反而看不出来。
+    filled = set((result.get("meta") or {}).get("section_backfilled") or [])
+    said_by_model = [u for u in (result.get("unverifiable") or []) if u not in filled]
     return "\n".join([
         result.get("answer", "") or "",
-        "\n".join(result.get("unverifiable", []) or []),
+        "\n".join(said_by_model),
     ])
 
 

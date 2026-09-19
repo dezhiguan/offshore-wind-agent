@@ -554,6 +554,24 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
         not unverifiable and conclusion and _UNVERIFIABLE_HINT.search(conclusion))
 
     evidence = run.get("evidence", {})
+    checklists = build_checklists(evidence)
+
+    # 模型把待核实事项写进了结论、第二段却留空 —— 界面上那张卡是空的，与正文直接矛盾
+    # （实测 S4：结论里逐项写着七项需现场核实，「现有资料无法确认」面板一条没有）。
+    # 规则引擎此刻已经把这些项算成 pending 了，拿它把面板补齐：与 basis 同理，
+    # 代码从真实判定渲染，不是模型的话。
+    # inconsistent 标记**不清除**：这是模型漏写、系统补上的，清掉就看不出三段纪律在退化。
+    # 补进来的条目单列一份 section_backfilled —— 用例判定只认模型自己写的那几条，
+    # 否则断言会被代码渲染的文本兜住，变成"用例靠证据蒙对"（见 eval/verdict.said）。
+    backfilled: list[str] = []
+    if unverifiable_inconsistent:
+        for card in checklists:
+            for item in card["items"]:
+                if item["state"] == "pending":
+                    backfilled.append("%s（%s）——现有资料无法确认，需要现场核实。"
+                                      % (item["label"], card["clause"]))
+        unverifiable = unverifiable + backfilled
+
     answer = parts.get(H_CONCLUSION, "").strip() or draft.strip()
     truncated = run.get("stop_reason") == "max_steps"
     swept = swept_rules(evidence)
@@ -607,7 +625,7 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
         "incomplete": [scrub_tool_names(i) for i in incomplete],
         "truncation": build_truncation(run, evidence, bool(incomplete)),
         # 把规则判定转成现场核实清单：同一份数据，从「我不知道」变成「你要去办的几件事」
-        "checklists": build_checklists(evidence),
+        "checklists": checklists,
         "sources": detect_sources(evidence),
         "evidence": evidence,
         "trace": run.get("trace", []),
@@ -622,6 +640,9 @@ def compose(question: str, run: dict[str, Any]) -> dict[str, Any]:
             "format_parsed": bool(parts),
             # 结论里写了"无法确认"、第二段却空着 —— 面板会是空的，与正文矛盾
             "unverifiable_inconsistent": unverifiable_inconsistent,
+            # 第二段留空时由规则判定补进去的条目，单列留痕：界面照常展示，
+            # 用例判定按它剔除，不让代码渲染的文本替模型答题
+            "section_backfilled": backfilled,
             # 步数用尽收口 —— 结论的覆盖面存疑，后台按它筛链路
             "truncated": truncated,
             # 正文被输出长度上限砍断 —— 结论本身残缺，与 truncated（没查完）分开记

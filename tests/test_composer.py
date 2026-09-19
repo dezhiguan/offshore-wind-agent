@@ -207,7 +207,11 @@ class TestUnverifiableConsistency:
 
     对抗性测试里模型把 7 项未确认条件全写进了结论，第二段写「无」——界面那块
     面板读的是第二段，显示为空，等于把模型自己说出来的缺口藏了起来。
-    这里只标记不回填：从自由文本里切句子，切错比空着更糟。
+
+    **不从自由文本里切句子回填**：切错比空着更糟，这一条不变。
+    但规则引擎已经逐项算出 pending 的场合是另一回事（2026-09-18 S4）：那不是从正文
+    猜出来的，是结构化判定结果，照 basis 的老办法由代码渲染进面板，并单列
+    meta.section_backfilled 留痕——inconsistent 标记不清除，用例判定也不认这几条。
     """
 
     def _run(self, draft):
@@ -228,6 +232,43 @@ class TestUnverifiableConsistency:
     def test_clean_answer_is_not_flagged(self):
         out = self._run("## 结论\nT01 共 5 条告警。\n\n## 现有资料无法确认\n无")
         assert out["meta"]["unverifiable_inconsistent"] is False
+
+    # ---- 规则引擎已算出 pending 时，面板由代码补齐（2026-09-18 S4）----
+
+    _PENDING_RUN = {
+        "draft": "## 结论\n七项前置条件现有资料无记录，需逐项现场核实。\n\n"
+                 "## 现有资料无法确认\n无",
+        "trace": [],
+        "evidence": {"tables": [], "docs": [], "rules": [{
+            "rule": "replace_precondition",
+            "result": {"ok": True, "facts": {
+                "工单": {"work_order_id": "WO-260707"},
+                "逐项核对": [
+                    {"项": "1. 机组已经停机", "结论": "满足", "依据": "最新告警状态为 STOPPED"},
+                    {"项": "5. 已完成验电", "结论": "现有资料无法确认"},
+                    {"项": "8. 所需备件当前可用", "结论": "不满足", "依据": "part_available=0"},
+                ]}}}]},
+    }
+
+    def test_pending_rule_items_backfill_the_empty_section(self):
+        out = compose("问题", dict(self._PENDING_RUN))
+        filled = out["meta"]["section_backfilled"]
+        assert len(filled) == 1 and "已完成验电" in filled[0]
+        assert filled[0] in out["unverifiable"]
+        # 满足 / 不满足两项不进面板：前者不是缺口，后者是已知的坏消息，归清单的 blocked
+        assert not any("机组已经停机" in u or "备件当前可用" in u for u in out["unverifiable"])
+        # 补齐不等于模型写对了，标记必须留着
+        assert out["meta"]["unverifiable_inconsistent"] is True
+
+    def test_backfilled_items_do_not_count_as_what_the_model_said(self):
+        from eval.verdict import said
+        out = compose("问题", dict(self._PENDING_RUN))
+        assert "已完成验电" not in said(out)
+
+    def test_nothing_to_backfill_when_no_rule_ran(self):
+        out = self._run("## 结论\n母线电压现有资料无法确认。\n\n## 现有资料无法确认\n无")
+        assert out["meta"]["section_backfilled"] == []
+        assert out["unverifiable"] == []
 
 
 # --------------------------------------------------------- 标题容错与「无」归一化
