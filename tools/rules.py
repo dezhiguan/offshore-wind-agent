@@ -876,13 +876,28 @@ def _attach_clause_texts(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+# 审计留痕的条数上限。全场遍历把同一条模板 SQL 按对象重复几十次，整份摊进 span
+# 只会把真正要看的判定明细挤出 DETAIL_CAP。超出的数量**写出来**（_audit_queries_omitted），
+# 不静默截断 —— 截断后看上去就像"规则引擎一共只发了这几条 SQL"。
+AUDIT_QUERY_CAP = 20
+
+
 def _run_tracking_sources(fn, args: dict[str, Any]) -> dict[str, Any]:
     """跑一条规则，并把它实际触达的数据源写进结果。
 
     嵌套调用（priority_required 里会调 repeat_fault）共用同一个集合，
     所以子规则查过的表也算在父结果头上 —— 依据面板要回答的是
     「这个结论建立在什么之上」，不是「哪一层函数发的 SQL」。
+
+    外层若已在跟踪（sweep 逐个判定对象时正是如此），本次收集到的东西退出时
+    **并回外层**。起因是 2026-09-19 边界用例 M2：sweep 返回的是一份新构造的结果，
+    25 个子结果的 sources 没有并上去就整个蒸发，于是「窗口统计全程查的
+    alarm_records」在数据源 chip 上一个字都没有，只剩条款兜底出来的规程 ——
+    这和当初「规则引擎替模型查掉的表会跟着漏」是同一个缺陷，只是漏在聚合那一层。
     """
+    outer_touched = _TOUCHED.get()
+    outer_queries = _QUERIES.get()
+    outer_sections = _SECTIONS.get()
     token = _TOUCHED.set(set())
     qtoken = _QUERIES.set([])
     stoken = _SECTIONS.set([])
@@ -896,17 +911,28 @@ def _run_tracking_sources(fn, args: dict[str, Any]) -> dict[str, Any]:
         _QUERIES.reset(qtoken)
         _SECTIONS.reset(stoken)
 
+    # 引用了条款，规程就是本次结论的数据源之一 —— 哪怕模型一次 get_doc_section 都没调。
+    # 反过来，没有记录、没得判（clauses 为空）时不能顺手把规程也记上。
+    # 这一步必须在并回外层之前做，否则逐条判定引到的条款到了 sweep 那层又没了。
+    if result.get("clauses"):
+        touched.add("safety_regulation")
+
+    if outer_touched is not None:
+        outer_touched.update(touched)
+    if outer_queries is not None:
+        outer_queries.extend(queries)
+    if outer_sections is not None:
+        outer_sections.extend(s for s in sections if s not in outer_sections)
+
     # `_audit_` 前缀 = 只进链路留存，不进模型上下文（loop._for_model 按前缀剥离）。
     # 原本靠"记得别回写 result"这条口头纪律，写进前缀约定才守得住。
     if queries:
-        result["_audit_queries"] = queries
+        result["_audit_queries"] = queries[:AUDIT_QUERY_CAP]
+        if len(queries) > AUDIT_QUERY_CAP:
+            result["_audit_queries_omitted"] = len(queries) - AUDIT_QUERY_CAP
     if sections:
         result["_audit_doc_sections"] = sections
 
-    # 引用了条款，规程就是本次结论的数据源之一 —— 哪怕模型一次 get_doc_section 都没调。
-    # 反过来，没有记录、没得判（clauses 为空）时不能顺手把规程也记上。
-    if result.get("clauses"):
-        touched.add("safety_regulation")
     if touched:
         result["sources"] = sorted(touched)
     return result
@@ -1242,7 +1268,9 @@ def check_rule(rule: str, **kwargs) -> dict[str, Any]:
                     "error": "scope=\"all\" 是全场遍历，不能同时指定 %s。"
                              "要判具体对象就去掉 scope，要全场名单就只传 rule。"
                              % "、".join(extra)}
-        return _attach_clause_texts(sweep(rule))
+        # 整个 sweep 套在跟踪里跑：既收上 25 份子结果的 sources，也把
+        # _all_subjects 那条枚举 SQL（判定对象从哪来的）一并留痕。
+        return _attach_clause_texts(_run_tracking_sources(sweep, {"rule": rule}))
     if subjects is not None:
         return _check_rule_batch(rule, subjects, kwargs)
 

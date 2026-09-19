@@ -432,6 +432,67 @@ class TestDeclaredSources:
         assert "maintenance_records" not in (r.get("sources") or [])
 
 
+class TestSweepDeclaredSources:
+    """全场遍历同样要自报数据源 —— 聚合那一层最容易把它弄丢。
+
+    起因是 2026-09-19 边界用例 M2「哪些风机已达重复故障标准但工单还不是 HIGH」：
+    正文全对（T03 / 24002 / WO-260703 / 应升 HIGH），却挂在数据源上 ——
+    sweep 返回的是新构造的结果，25 份子结果的 sources 一份都没并上去，
+    于是「窗口统计全程查的 alarm_records」在 chip 上一个字都没有，
+    只剩 clauses 兜底出来的规程。漏的不是模型查的表，是**规则引擎替模型查的表**。
+    """
+
+    def test_sweep_reports_tables_it_scanned(self):
+        r = check_rule("repeat_fault", scope="all")
+        assert r["ok"] is True
+        assert "alarm_records" in r["sources"], "全场窗口统计查的表没报出来"
+        assert "safety_regulation" in r["sources"]
+
+    def test_sweep_sources_reach_the_source_chips(self):
+        """一路走到界面那一格：composer 认的是 evidence，不是规则函数的内部状态。"""
+        from agent.composer import detect_sources
+        r = check_rule("repeat_fault", scope="all")
+        chips = detect_sources({"tables": [], "docs": [],
+                                "rules": [{"rule": "repeat_fault", "result": r}]})
+        assert any("alarm_records" in c for c in chips)
+
+    def test_sweep_over_work_orders_reports_both_tables(self):
+        """按工单遍历：对象清单来自工单表，判定本身又回头查告警表，两张都算。"""
+        r = check_rule("close_compliance", scope="all")
+        assert {"alarm_records", "maintenance_records"} <= set(r["sources"])
+
+    def test_sweep_records_the_subject_enumeration_query(self):
+        """判定对象是怎么定下来的，必须可回溯 —— 枚举那条 SQL 也要留痕。"""
+        r = check_rule("repeat_fault", scope="all")
+        queries = r.get("_audit_queries") or []
+        assert any("DISTINCT turbine_id" in q["sql"] for q in queries)
+
+    def test_sweep_audit_queries_capped_but_says_so(self):
+        """几十条同形 SQL 会把判定明细挤出 span 的 DETAIL_CAP；截断要说出来。"""
+        from tools.rules import AUDIT_QUERY_CAP
+        r = check_rule("repeat_fault", scope="all")
+        assert len(r["_audit_queries"]) <= AUDIT_QUERY_CAP
+        assert r.get("_audit_queries_omitted", 0) > 0, "本例有 26 条查询，应当有被略去的"
+
+    def test_sweep_audit_keys_do_not_reach_the_model(self):
+        from agent.loop import _for_model
+        r = check_rule("repeat_fault", scope="all")
+        assert not any(k.startswith("_audit_") for k in _for_model(r))
+        assert _for_model(r)["coverage"]["完整"] is True, "剥离不能误伤正常字段"
+
+    def test_batch_path_keeps_per_subject_sources(self):
+        """subjects 这条路顶层不带 sources，靠 loop 摊平成逐条 —— 摊平前的那份不能空。"""
+        r = check_rule("repeat_fault",
+                       subjects=[{"turbine_id": "T03", "fault_code": "24002"}])
+        inner = r["results"][0]["result"]
+        assert "alarm_records" in inner["sources"]
+
+    def test_single_judgement_unaffected_by_nesting_change(self):
+        """并回外层不能改变单条判定自己那份 sources。"""
+        r = check_rule("repeat_fault", turbine_id="T03", fault_code="24002")
+        assert r["sources"] == ["alarm_records", "safety_regulation"]
+
+
 class TestGeneralQuestionMode:
     """泛问不绑定具体对象时，规则引擎给通则而不是缺席。
 
